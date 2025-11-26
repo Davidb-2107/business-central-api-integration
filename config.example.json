@@ -1,0 +1,19 @@
+{
+  "business_central": {
+    "tenant_id": "VOTRE_TENANT_ID",
+    "client_id": "VOTRE_CLIENT_ID",
+    "client_secret": "VOTRE_CLIENT_SECRET",
+    "environment": "Production",
+    "api_base_url": "https://api.businesscentral.dynamics.com/v2.0"
+  },
+  "oauth": {
+    "token_url": "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+    "scope": "https://api.businesscentral.dynamics.com/.default"
+  },
+  "notes": {
+    "tenant_id": "Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "client_id": "Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "client_secret": "Copiez la Value (pas le Secret ID) lors de la création",
+    "environment": "Valeurs possibles: Production, Sandbox"
+  }
+}
