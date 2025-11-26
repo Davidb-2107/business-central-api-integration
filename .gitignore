@@ -1,0 +1,42 @@
+# Fichiers de configuration avec credentials
+.env
+.env.local
+config.json
+credentials.json
+secrets.json
+
+# Postman
+*.postman_collection.json
+*.postman_environment.json
+
+# n8n
+n8n-credentials.json
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Node
+node_modules/
+package-lock.json
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+
+# Temporary files
+*.tmp
+temp/
