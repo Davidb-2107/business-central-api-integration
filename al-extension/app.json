@@ -2,9 +2,9 @@
   "id": "b4a5136c-97b6-47b0-b72b-333a64b8f37b",
   "name": "QR Reader Custom API",
   "publisher": "DavidB",
-  "version": "1.1.0.0",
+  "version": "1.3.0.0",
   "brief": "Custom APIs for QR-bill automation with n8n",
-  "description": "Extension exposing custom API endpoints for Vendors (with posting groups) and Purchase Invoices (with payment reference) for Swiss QR-bill processing automation.",
+  "description": "Extension exposing custom API endpoints for Vendors (with posting groups), Purchase Invoices (with payment reference), Purchase Lines (with dimensions), and Dimension Set Entries for Swiss QR-bill processing automation.",
   "application": "27.0.0.0",
   "idRanges": [
     {
