@@ -18,19 +18,26 @@ Configuration de l'authentification OAuth 2.0 :
 - 🔌 Intégration avec n8n
 - ❌ Résolution des erreurs courantes
 
-### [📗 Guide Extension AL](./GUIDE_AL_EXTENSION.md) ⭐ NEW
+### [📗 Guide Extension AL](./GUIDE_AL_EXTENSION.md)
 
 Création d'APIs custom pour les champs non exposés :
 - 🔧 Création de projet AL dans VS Code
 - 📦 Extension pour Vendors (avec Posting Groups)
 - 📦 Extension pour Purchase Invoices (avec Payment Reference)
+- 📦 Extension pour Purchase Lines (avec Dimensions)
 - 🚀 Compilation et déploiement
 
 ### [📁 Extension AL](./al-extension/)
 
-Code source de l'extension AL :
+Code source de l'extension AL v1.3.0 :
 - `CustomVendorAPI.al` - API custom pour les vendors
 - `CustomPurchaseInvoiceAPI.al` - API custom pour les factures d'achat
+- `CustomPurchaseLineAPI.al` - API custom pour les lignes avec dimensions
+- `CustomDimensionSetEntryAPI.al` - API pour lire les valeurs de dimensions
+
+### [📄 Spécification QR-Reader](./docs/QR_READER_MANDAT_SPEC.md)
+
+Spécification pour l'ajout du champ Mandat dans l'application QR-Reader.
 
 ## 🎯 Cas d'Usage
 
@@ -39,16 +46,22 @@ Ce repository vous permet de :
 - Synchroniser Business Central avec votre CRM
 - Automatiser la création de factures avec les bons posting groups
 - Enregistrer la référence de paiement QR sur les factures
+- **Assigner automatiquement les dimensions analytiques (MANDAT)**
 - Exporter des données vers Excel/Google Sheets
 - Créer des notifications automatiques (Slack, Email)
 
-## 🏗️ Architecture type
+## 🏗️ Architecture complète
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │  QR-Reader  │────▶│    n8n      │────▶│ Custom API  │────▶│  Business   │
 │  (PDF scan) │     │  Workflow   │     │ (AL ext.)   │     │  Central    │
+│  + Mandat   │     │             │     │             │     │             │
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                           │
+                           ├──▶ Search/Create Vendor (posting groups)
+                           ├──▶ Create Invoice (paymentReference)
+                           └──▶ Create Invoice Line (dimensions MANDAT)
 ```
 
 ## ⚡ Démarrage Rapide
@@ -57,8 +70,9 @@ Ce repository vous permet de :
 2. Ajoutez Business Central Online (essai 30 jours)
 3. Suivez le [guide de configuration OAuth](./GUIDE_CONFIGURATION_API.md)
 4. Déployez l'[extension AL](./al-extension/) pour les APIs custom
-5. Testez avec Postman
-6. Commencez vos automatisations !
+5. Configurez les dimensions (MANDAT, SOUS-MANDAT) dans General Ledger Setup
+6. Testez avec Postman
+7. Commencez vos automatisations !
 
 ## 🛠️ Technologies
 
@@ -68,6 +82,7 @@ Ce repository vous permet de :
 - AL Language (Visual Studio Code)
 - Postman (tests)
 - n8n (automatisation)
+- Vercel (hébergement QR-Reader)
 
 ## 📋 Prérequis
 
@@ -77,12 +92,44 @@ Ce repository vous permet de :
 - Visual Studio Code + Extension AL Language
 - Postman (gratuit)
 
-## 📦 APIs Custom exposées
+## 📦 APIs Custom exposées (v1.3.0)
 
-| Endpoint | Description | Champs clés |
-|----------|-------------|-------------|
-| `/api/davidb/qrReader/v1.0/customVendors` | Vendors | genBusPostingGroup, vendorPostingGroup, vatBusPostingGroup |
-| `/api/davidb/qrReader/v1.0/customPurchaseInvoices` | Factures | paymentReference |
+| Page ID | Endpoint | Description | Champs clés |
+|---------|----------|-------------|-------------|
+| 50100 | `/customVendors` | Vendors | genBusPostingGroup, vendorPostingGroup, vatBusPostingGroup |
+| 50101 | `/customPurchaseInvoices` | Factures | paymentReference |
+| 50102 | `/customPurchaseLines` | Lignes facture | shortcutDimension1Code (MANDAT), shortcutDimension2Code |
+| 50103 | `/dimensionSetEntries` | Dimensions | dimensionCode, dimensionValueCode |
+
+Base URL : `https://api.businesscentral.dynamics.com/v2.0/{tenantId}/{environment}/api/davidb/qrReader/v1.0`
+
+## 🔧 Configuration des Dimensions
+
+Dans **General Ledger Setup** → **Dimensions** :
+
+| Dimension | Code |
+|-----------|------|
+| Global Dimension 1 | MANDAT |
+| Global Dimension 2 | SOUS-MANDAT |
+| Shortcut Dimension 1 | MANDAT |
+| Shortcut Dimension 2 | SOUS-MANDAT |
+
+## 📝 Exemple de workflow n8n
+
+### Body pour créer une ligne de facture avec dimension
+
+```json
+{
+  "documentNo": "107218",
+  "type": "G/L Account",
+  "no": "6510",
+  "description": "CENTRE PATRONAL",
+  "quantity": 1,
+  "directUnitCost": 18250.00,
+  "shortcutDimension1Code": "764",
+  "shortcutDimension2Code": ""
+}
+```
 
 ## 🔗 Ressources Utiles
 
