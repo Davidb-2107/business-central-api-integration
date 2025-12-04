@@ -7,10 +7,12 @@ Extension AL pour Business Central exposant des APIs custom nécessaires à l'au
 L'API standard Business Central v2.0 ne permet pas de :
 - Définir les **Posting Groups** (Gen. Bus., Vendor, VAT Bus.) lors de la création de vendors
 - Accéder au champ **Payment Reference** sur les factures d'achat
+- Définir les **Dimensions** (MANDAT, SOUS-MANDAT) sur les lignes de facture
 
 Sans ces champs :
 - Les vendors créés génèrent une erreur lors de la création de factures
 - La référence QR suisse ne peut pas être enregistrée sur les factures
+- Les dimensions analytiques ne peuvent pas être assignées automatiquement
 
 ## APIs exposées
 
@@ -18,6 +20,19 @@ Sans ces champs :
 |---------|----------|-------------|
 | 50100 | `/api/davidb/qrReader/v1.0/customVendors` | Vendors avec posting groups |
 | 50101 | `/api/davidb/qrReader/v1.0/customPurchaseInvoices` | Factures avec payment reference |
+| 50102 | `/api/davidb/qrReader/v1.0/customPurchaseLines` | Lignes de facture avec dimensions |
+| 50103 | `/api/davidb/qrReader/v1.0/dimensionSetEntries` | Lecture des valeurs de dimensions |
+
+## Configuration des dimensions
+
+Dans **General Ledger Setup** → **Dimensions** :
+
+| Dimension | Code |
+|-----------|------|
+| Global Dimension 1 | MANDAT |
+| Global Dimension 2 | SOUS-MANDAT |
+| Shortcut Dimension 1 | MANDAT |
+| Shortcut Dimension 2 | SOUS-MANDAT |
 
 ## Installation
 
@@ -33,7 +48,7 @@ Sans ces champs :
 2. Modifier `.vscode/launch.json` avec votre tenant ID
 3. `Ctrl+Shift+P` → `AL: Download Symbols`
 4. `Ctrl+Shift+B` pour compiler
-5. `F5` pour publier sur le Sandbox
+5. `Ctrl+Shift+P` → `AL: Publish` pour publier sur le Sandbox
 
 ## Utilisation
 
@@ -73,6 +88,30 @@ Content-Type: application/json
   "vendorInvoiceNumber": "INV-2025-001",
   "paymentReference": "000000000000002250627109240"
 }
+```
+
+### Créer une ligne de facture avec dimensions
+
+```http
+POST /companies({companyId})/customPurchaseLines
+Content-Type: application/json
+
+{
+  "documentNo": "107218",
+  "type": "G/L Account",
+  "no": "6510",
+  "description": "Prestation de service",
+  "quantity": 1,
+  "directUnitCost": 18250.00,
+  "shortcutDimension1Code": "764",
+  "shortcutDimension2Code": ""
+}
+```
+
+### Lire les dimensions d'un Dimension Set
+
+```http
+GET /companies({companyId})/dimensionSetEntries?$filter=dimensionSetId eq 4
 ```
 
 ## Champs exposés
@@ -117,6 +156,34 @@ Content-Type: application/json
 | status | Status | Non |
 | lastModifiedDateTime | SystemModifiedAt | Non |
 
+### customPurchaseLine
+
+| Champ | Description | Éditable |
+|-------|-------------|----------|
+| id | SystemId | Non |
+| documentNo | Document No. | Oui |
+| lineNo | Line No. | Non |
+| type | Type (G/L Account, Item, etc.) | Oui |
+| no | No. (compte ou article) | Oui |
+| description | Description | Oui |
+| quantity | Quantity | Oui |
+| directUnitCost | Direct Unit Cost | Oui |
+| lineAmount | Line Amount | Non |
+| amount | Amount | Non |
+| amountIncludingVAT | Amount Including VAT | Non |
+| **shortcutDimension1Code** | MANDAT | Oui |
+| **shortcutDimension2Code** | SOUS-MANDAT | Oui |
+| dimensionSetID | Dimension Set ID | Non |
+
+### dimensionSetEntry
+
+| Champ | Description | Éditable |
+|-------|-------------|----------|
+| dimensionSetId | Dimension Set ID | Non |
+| dimensionCode | Dimension Code | Non |
+| dimensionValueCode | Dimension Value Code | Non |
+| dimensionValueName | Dimension Value Name | Non |
+
 ## Intégration avec n8n
 
 ### Configuration
@@ -131,28 +198,51 @@ Dans le nœud Config de votre workflow n8n :
 }
 ```
 
-### Workflow type
+### Workflow complet
 
 ```
 [Webhook QR-Reader]
         │
         ▼
-[Search Vendor] ──── customApiBaseUrl + /customVendors
+[Search Vendor] ──────── /customVendors?$filter=displayName eq 'xxx'
         │
         ▼
-[Create Vendor?] ──── customApiBaseUrl + /customVendors (avec posting groups)
+[Create Vendor?] ─────── /customVendors (avec posting groups)
         │
         ▼
-[Create Invoice] ──── customApiBaseUrl + /customPurchaseInvoices (avec paymentReference)
+[Create Invoice] ─────── /customPurchaseInvoices (avec paymentReference)
         │
         ▼
-[Add Invoice Line] ── apiBaseUrl + /purchaseInvoices({id})/purchaseInvoiceLines
+[Add Invoice Line] ───── /customPurchaseLines (avec dimensions MANDAT)
 ```
 
-> **Note** : Les lignes de facture utilisent l'API standard car elles fonctionnent avec les factures créées via l'API custom.
+## Intégration avec QR-Reader
+
+L'application QR-Reader doit envoyer les données suivantes au webhook n8n :
+
+```json
+{
+  "parsedData": {
+    "companyName": "CENTRE PATRONAL",
+    "street": "Route du Lac",
+    "buildingNumber": "2",
+    "postalCode": "1094",
+    "city": "Paudex",
+    "country": "CH",
+    "amount": 18250.00,
+    "currency": "CHF",
+    "reference": "22506271",
+    "payment_reference": "000000000000002250627109240",
+    "mandat": "764"
+  }
+}
+```
+
+Le champ `mandat` est optionnel et correspond au code Client N° visible sur certaines factures fournisseurs.
 
 ## Notes importantes
 
 - Le développement AL n'est autorisé que sur les environnements **Sandbox**
 - Pour déployer en Production, modifier `launch.json` et incrémenter la version
 - Les posting groups "INLAND" sont appropriés pour les vendors suisses B2B
+- Les codes MANDAT correspondent aux numéros de client chez les fournisseurs (ex: 764 pour CENTRE PATRONAL)
