@@ -22,6 +22,7 @@ Ce guide explique comment créer et déployer l'extension AL qui expose des cham
 L'API standard Business Central v2.0 ne permet pas de :
 - Définir les **Posting Groups** (Gen. Bus., Vendor, VAT Bus.) lors de la création de vendors
 - Accéder au champ **Payment Reference** sur les factures d'achat
+- Définir les **Dimensions** (MANDAT, SOUS-MANDAT) sur les lignes de facture
 
 ### Conséquences
 
@@ -31,7 +32,7 @@ Erreur : "Gen. Bus. Posting Group must have a value in Vendor: No.=V00010.
          It cannot be zero or empty"
 ```
 
-Les vendors créés via l'API ne peuvent pas être utilisés pour créer des factures.
+Les vendors créés via l'API ne peuvent pas être utilisés pour créer des factures, et les dimensions analytiques ne peuvent pas être assignées automatiquement.
 
 ### La solution
 
@@ -95,7 +96,7 @@ Modifier le fichier `app.json` :
   "id": "b4a5136c-97b6-47b0-b72b-333a64b8f37b",
   "name": "QR Reader Custom API",
   "publisher": "VotreNom",
-  "version": "1.0.0.0",
+  "version": "1.3.0.0",
   "brief": "Custom APIs for QR-bill automation",
   "description": "Extension exposant des APIs custom pour l'automatisation des QR-factures suisses",
   "application": "27.0.0.0",
@@ -169,60 +170,30 @@ Supprimez `HelloWorld.al` (fichier exemple créé automatiquement).
 
 ### API Vendor (Page 50100)
 
-Créer `CustomVendorAPI.al` :
-
-```al
-page 50100 "Custom Vendor API"
-{
-    APIGroup = 'qrReader';
-    APIPublisher = 'davidb';
-    APIVersion = 'v1.0';
-    EntityName = 'customVendor';
-    EntitySetName = 'customVendors';
-    PageType = API;
-    SourceTable = Vendor;
-    DelayedInsert = true;
-    ODataKeyFields = SystemId;
-
-    layout
-    {
-        area(Content)
-        {
-            repeater(GroupName)
-            {
-                // Champs standards
-                field(id; Rec.SystemId) { Editable = false; }
-                field(number; Rec."No.") { }
-                field(displayName; Rec.Name) { }
-                // ... autres champs ...
-                
-                // Posting Groups (non disponibles dans l'API standard)
-                field(genBusPostingGroup; Rec."Gen. Bus. Posting Group") { }
-                field(vendorPostingGroup; Rec."Vendor Posting Group") { }
-                field(vatBusPostingGroup; Rec."VAT Bus. Posting Group") { }
-            }
-        }
-    }
-}
-```
+Créer `CustomVendorAPI.al` - expose les posting groups pour créer des vendors valides.
 
 ### API Purchase Invoice (Page 50101)
 
-Créer `CustomPurchaseInvoiceAPI.al` :
+Créer `CustomPurchaseInvoiceAPI.al` - expose le champ `paymentReference` pour les QR-factures.
+
+### API Purchase Line (Page 50102)
+
+Créer `CustomPurchaseLineAPI.al` - expose les dimensions pour assigner MANDAT et SOUS-MANDAT :
 
 ```al
-page 50101 "Custom Purchase Invoice API"
+page 50102 "Custom Purchase Line API"
 {
     APIGroup = 'qrReader';
     APIPublisher = 'davidb';
     APIVersion = 'v1.0';
-    EntityName = 'customPurchaseInvoice';
-    EntitySetName = 'customPurchaseInvoices';
+    EntityName = 'customPurchaseLine';
+    EntitySetName = 'customPurchaseLines';
     PageType = API;
-    SourceTable = "Purchase Header";
+    SourceTable = "Purchase Line";
     SourceTableView = where("Document Type" = const(Invoice));
     DelayedInsert = true;
     ODataKeyFields = SystemId;
+    Editable = true;
 
     layout
     {
@@ -230,20 +201,46 @@ page 50101 "Custom Purchase Invoice API"
         {
             repeater(GroupName)
             {
-                // Champs standards
                 field(id; Rec.SystemId) { Editable = false; }
-                field(vendorNumber; Rec."Buy-from Vendor No.") { }
-                // ... autres champs ...
-                
-                // Payment Reference (non disponible dans l'API standard)
-                field(paymentReference; Rec."Payment Reference") { }
+                field(documentNo; Rec."Document No.") { }
+                field(type; Rec.Type) { }
+                field(no; Rec."No.") { }
+                field(description; Rec.Description) { }
+                field(quantity; Rec.Quantity) { }
+                field(directUnitCost; Rec."Direct Unit Cost") { }
+                // Dimensions
+                field(shortcutDimension1Code; Rec."Shortcut Dimension 1 Code") { }
+                field(shortcutDimension2Code; Rec."Shortcut Dimension 2 Code") { }
             }
         }
     }
 }
 ```
 
+### API Dimension Set Entry (Page 50103)
+
+Créer `CustomDimensionSetEntryAPI.al` - permet de lire les valeurs de dimensions.
+
 Voir les fichiers complets dans le dossier `al-extension/`.
+
+## Configuration des Dimensions
+
+Avant d'utiliser les dimensions via l'API, configurez-les dans Business Central :
+
+### General Ledger Setup → Dimensions
+
+| Dimension | Code |
+|-----------|------|
+| Global Dimension 1 | MANDAT |
+| Global Dimension 2 | SOUS-MANDAT |
+| Shortcut Dimension 1 | MANDAT |
+| Shortcut Dimension 2 | SOUS-MANDAT |
+
+### Créer des valeurs de dimension
+
+1. Recherche (Alt+Q) → "Dimension Values"
+2. Filtre par Dimension Code = MANDAT
+3. Créer les valeurs (ex: 752, 754, 764, etc.)
 
 ## Compilation et publication
 
@@ -254,7 +251,7 @@ Voir les fichiers complets dans le dossier `al-extension/`.
 
 ### Publier
 
-1. `F5` ou `AL: Publish`
+1. `Ctrl+Shift+P` → `AL: Publish` (ou `F5`)
 2. Authentifiez-vous si demandé
 3. Attendez le message "Success: The package has been published"
 
@@ -266,33 +263,38 @@ Voir les fichiers complets dans le dossier `al-extension/`.
 https://api.businesscentral.dynamics.com/v2.0/{tenantId}/{environmentName}/api/davidb/qrReader/v1.0
 ```
 
-### Avec Postman
+### Créer une ligne de facture avec dimension
 
-**GET - Lister les vendors :**
-```
-GET .../companies({companyId})/customVendors
-Authorization: Bearer {token}
-```
-
-**POST - Créer un vendor :**
-```json
-POST .../companies({companyId})/customVendors
+```http
+POST .../companies({companyId})/customPurchaseLines
 Content-Type: application/json
 
 {
-  "displayName": "Test Vendor",
-  "genBusPostingGroup": "INLAND",
-  "vendorPostingGroup": "INLAND",
-  "vatBusPostingGroup": "INLAND"
+  "documentNo": "107218",
+  "type": "G/L Account",
+  "no": "6510",
+  "description": "CENTRE PATRONAL",
+  "quantity": 1,
+  "directUnitCost": 18250.00,
+  "shortcutDimension1Code": "764",
+  "shortcutDimension2Code": ""
 }
 ```
 
 ### Avec n8n
 
-Utilisez un nœud HTTP Request avec :
-- Method: GET ou POST
-- URL: L'URL de l'API custom
-- Authentication: OAuth2 (configuré pour Business Central)
+```json
+{
+  "documentNo": "{{ $('Create Purchase Invoice').item.json.number }}",
+  "type": "G/L Account",
+  "no": "6510",
+  "description": "{{ $('Webhook').item.json.body.parsedData.companyName }}",
+  "quantity": 1,
+  "directUnitCost": {{ Number($('Webhook').item.json.body.parsedData.amount) || 0 }},
+  "shortcutDimension1Code": "{{ $('Webhook').item.json.body.parsedData.mandat || '' }}",
+  "shortcutDimension2Code": ""
+}
+```
 
 ## Résolution des erreurs
 
@@ -318,6 +320,7 @@ Utilisez un nœud HTTP Request avec :
 |--------|-------|----------|
 | 404 sur l'API | API non publiée | Republier l'extension |
 | Champ non trouvé | Version non à jour | Incrémenter version + republier |
+| JSON invalid | Syntaxe JSON incorrecte | Vérifier les virgules et guillemets |
 
 ## Migration vers Production
 
@@ -336,12 +339,12 @@ Une fois les tests terminés sur Sandbox :
 
 Dans `app.json` :
 ```json
-"version": "1.1.0.0"
+"version": "1.4.0.0"
 ```
 
 ### Étape 3 : Publier
 
-`F5` pour publier en Production.
+`Ctrl+Shift+P` → `AL: Publish` pour publier en Production.
 
 ### Étape 4 : Mettre à jour les URLs
 
