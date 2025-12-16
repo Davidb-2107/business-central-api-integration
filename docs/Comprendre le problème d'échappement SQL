@@ -1,0 +1,245 @@
+# Comprendre le problème d'échappement SQL
+
+## 🎯 Le problème en une phrase
+
+L'apostrophe dans "Caisse d'allocations familiales" est interprétée comme la **fin de la chaîne SQL**, ce qui casse la syntaxe de ta requête.
+
+---
+
+## 🏠 Analogie : La lettre mal adressée
+
+Imagine que tu envoies une lettre avec cette adresse :
+
+```
+Monsieur Jean D'Arcy
+Rue de l'Église 12
+1000 Lausanne
+```
+
+Si le système postal utilise l'apostrophe comme séparateur de champs, il va lire :
+
+| Champ | Valeur lue |
+|-------|------------|
+| Nom | `Monsieur Jean D` |
+| ??? | `Arcy` ← ???  |
+| Rue | `Rue de l` |
+| ??? | `Église 12` ← ??? |
+
+**Le système est perdu** car l'apostrophe a un double sens :
+1. Caractère normal dans un nom (D'Arcy)
+2. Séparateur technique du système
+
+C'est exactement ce qui se passe avec SQL !
+
+---
+
+## 🔍 Analyse visuelle du problème
+
+### Ce que tu écris dans n8n :
+
+```
+{{ $json.debtor_name }}  →  "Caisse d'allocations familiales"
+```
+
+### Ce que n8n génère (interpolation directe) :
+
+```sql
+SELECT * FROM invoice_vendor_mappings
+WHERE debtor_name ILIKE '%Caisse d'allocations familiales%'
+```
+
+### Ce que PostgreSQL comprend :
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  WHERE debtor_name ILIKE '%Caisse d'allocations familiales%'                │
+│                                    ↑                                        │
+│                          PostgreSQL voit ici                                │
+│                          la FIN de la chaîne                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+PostgreSQL décompose ainsi :
+
+  '%Caisse d'        →  ✅ Chaîne valide (entre guillemets simples)
+  allocations        →  ❌ Mot-clé inconnu ? Nom de colonne ?
+  familiales%'       →  ❌ Syntaxe invalide
+```
+
+### Schéma de l'interprétation :
+
+```
+Code SQL envoyé:
+┌────────────────────────────────────────────────────────────────┐
+│ ...ILIKE '%Caisse d'allocations familiales%'                   │
+└────────────────────────────────────────────────────────────────┘
+            │         │                      │
+            ▼         ▼                      ▼
+         ┌─────┐   ┌─────┐              ┌─────────┐
+         │  '  │   │  '  │              │    '    │
+         │START│   │ END │              │ORPHELINE│
+         └─────┘   └─────┘              └─────────┘
+            │         │                      │
+            ▼         ▼                      ▼
+      ┌──────────┐  ┌─────────────────┐  ┌────────┐
+      │ Chaîne:  │  │   Interprété    │  │ Erreur │
+      │ %Caisse d│  │   comme code    │  │ syntaxe│
+      └──────────┘  └─────────────────┘  └────────┘
+```
+
+---
+
+## 🛡️ La solution : les requêtes paramétrées
+
+### Principe
+
+Au lieu d'injecter la valeur directement dans le SQL, on utilise des **placeholders** (`$1`, `$2`, etc.) et on passe les valeurs séparément.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      AVANT (dangereux)                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Template:  "SELECT * WHERE name = '{{ valeur }}'"             │
+│                                       └────┬────┘               │
+│   Valeur:    "D'Arcy"                      │                    │
+│                  │                         │                    │
+│                  └────────► injection ◄────┘                    │
+│                                 │                               │
+│                                 ▼                               │
+│   Résultat:  "SELECT * WHERE name = 'D'Arcy'"                   │
+│                                     ↑                           │
+│                              SYNTAXE CASSÉE                     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                      APRÈS (sécurisé)                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Requête:     "SELECT * WHERE name = $1"                       │
+│   Paramètres:  [$1 = "D'Arcy"]                                  │
+│                        │                                        │
+│                        ▼                                        │
+│              ┌─────────────────┐                                │
+│              │   PostgreSQL    │                                │
+│              │   sait que $1   │                                │
+│              │   est une valeur│                                │
+│              │   PAS du code   │                                │
+│              └─────────────────┘                                │
+│                        │                                        │
+│                        ▼                                        │
+│   PostgreSQL échappe automatiquement: 'D''Arcy'                 │
+│                                         ↑↑                      │
+│                                    apostrophe                   │
+│                                    doublée = safe               │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🔧 Application dans n8n
+
+### Configuration du node PostgreSQL
+
+#### Avant (ta configuration actuelle) :
+
+```javascript
+// Dans le champ "Query" du node
+`SELECT mandat_bc, sous_mandat_bc, confidence, usage_count
+FROM invoice_vendor_mappings m
+JOIN bc_companies c ON m.company_id = c.id
+WHERE c.bc_company_id = '{{ $json.bc_company_id }}'
+  AND m.debtor_name ILIKE '%{{ $json.debtor_name }}%'
+ORDER BY confidence DESC, usage_count DESC
+LIMIT 1`
+```
+
+#### Après (configuration sécurisée) :
+
+```javascript
+// Dans le champ "Query" du node
+`SELECT mandat_bc, sous_mandat_bc, confidence, usage_count
+FROM invoice_vendor_mappings m
+JOIN bc_companies c ON m.company_id = c.id
+WHERE c.bc_company_id = $1
+  AND m.debtor_name ILIKE '%' || $2 || '%'
+ORDER BY confidence DESC, usage_count DESC
+LIMIT 1`
+```
+
+```javascript
+// Dans "Query Parameters" (tableau)
+[
+  "{{ $json.bc_company_id }}",    // → $1
+  "{{ $json.debtor_name }}"       // → $2
+]
+```
+
+### Explication de la syntaxe `'%' || $2 || '%'`
+
+```
+'%'  ||  $2  ||  '%'
+ │      │       │
+ │      │       └── Chaîne littérale: %
+ │      │
+ │      └────────── Paramètre sécurisé: Caisse d'allocations familiales
+ │
+ └───────────────── Chaîne littérale: %
+
+ || = opérateur de concaténation PostgreSQL
+
+Résultat: %Caisse d'allocations familiales%
+```
+
+---
+
+## 🚨 Bonus : pourquoi c'est aussi un problème de sécurité
+
+### L'injection SQL
+
+Un utilisateur malveillant pourrait exploiter cette faille :
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Scénario d'attaque                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Valeur malveillante entrée:                                   │
+│   "'; DROP TABLE invoice_vendor_mappings; --"                   │
+│                                                                 │
+│   Requête générée:                                              │
+│   SELECT * FROM mappings                                        │
+│   WHERE name = ''; DROP TABLE invoice_vendor_mappings; --'      │
+│                 ↑                                      ↑        │
+│           fin chaîne                             commentaire    │
+│           vide                                   (ignore reste) │
+│                                                                 │
+│   PostgreSQL exécute:                                           │
+│   1. SELECT * FROM mappings WHERE name = ''    ← requête vide   │
+│   2. DROP TABLE invoice_vendor_mappings        ← CATASTROPHE!   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+Avec les requêtes paramétrées, cette attaque est **impossible** car PostgreSQL traite toujours `$1` comme une valeur, jamais comme du code.
+
+---
+
+## 📋 Checklist de correction
+
+- [ ] Ouvrir le workflow "QR-Reader" dans n8n
+- [ ] Éditer le node "RAG Lookup"
+- [ ] Remplacer les interpolations `{{ }}` par des placeholders `$1`, `$2`
+- [ ] Activer "Query Parameters" dans les options
+- [ ] Ajouter les paramètres dans l'ordre
+- [ ] Tester avec "Caisse d'allocations familiales"
+- [ ] Tester avec d'autres cas spéciaux (guillemets, backslash, etc.)
+
+---
+
+## 📚 Ressources
+
+- [Documentation n8n - Node PostgreSQL](https://docs.n8n.io/integrations/builtin/app-nodes/n8n-nodes-base.postgres/)
+- [PostgreSQL - Paramètres préparés](https://www.postgresql.org/docs/current/sql-prepare.html)
+- [OWASP - SQL Injection Prevention](https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html)
