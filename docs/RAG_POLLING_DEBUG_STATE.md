@@ -1,8 +1,9 @@
-# RAG Polling Workflow - État et Debug en cours
+# RAG Polling Workflow - Documentation Complète
 
 **Date** : 2025-12-19  
 **Workflow ID** : `0HxQZrWL9vWitBYq`  
-**Nom** : RAG Polling - Posted Purchase Invoices
+**Nom** : RAG Polling - Posted Purchase Invoices  
+**Status** : ✅ **FONCTIONNEL EN PRODUCTION**
 
 ---
 
@@ -10,26 +11,44 @@
 
 Workflow n8n qui poll les factures comptabilisées depuis Business Central pour alimenter automatiquement la table `vendor_gl_mappings` (RAG G/L Account attribution).
 
+**Résultats** : 11 lignes G/L traitées, 9 mappings uniques créés avec UPSERT.
+
 ---
 
-## 🎯 PROBLÈME RÉSOLU
+## 🎯 PROBLÈMES RÉSOLUS
 
-### Encodage OData du champ `type`
-
-Le champ `type` dans les lignes BC est encodé :
+### 1. Encodage OData du champ `type`
 
 | Valeur BC | Valeur API OData |
 |-----------|------------------|
 | `G/L Account` | `G_x002F_L_x0020_Account` |
 | `Item` | `Item` |
 
-**Correction appliquée** : Dans le node "Is G/L Account Line?", utiliser `G_x002F_L_x0020_Account` au lieu de `G/L Account`.
+### 2. Structure imbriquée après Split Lines
+
+L'API retourne les données dans un objet `value`, donc tous les champs doivent être accédés via `$json.value.*` :
+
+```json
+{
+  "@odata.context": "...",
+  "value": {
+    "type": "G_x002F_L_x0020_Account",
+    "no": "6510",
+    "description": "Webhook",
+    ...
+  }
+}
+```
+
+### 3. Code node en mode batch
+
+Le noeud "Extract Description Keyword" doit traiter tous les items avec `$input.all()`, pas seulement le premier.
 
 ---
 
-## État actuel : WORKFLOW FONCTIONNEL
+## État actuel : WORKFLOW FONCTIONNEL ✅
 
-### ✅ Tous les noeuds validés
+### Tous les noeuds validés
 
 | Noeud | Status | Output |
 |-------|--------|--------|
@@ -42,8 +61,12 @@ Le champ `type` dans les lignes BC est encodé :
 | Has New Invoices? | ✅ | Condition sur `records_count > 0` |
 | Split Invoices | ✅ | 20 items individuels |
 | BC - Get Invoice Lines | ✅ | 20 appels API, lignes récupérées |
-| Split Lines | ✅ | Lignes individuelles |
-| Is G/L Account Line? | ✅ | Condition: `type == "G_x002F_L_x0020_Account"` |
+| Split Lines | ✅ | 20 lignes (Include: All Other Fields) |
+| Is G/L Account Line? | ✅ | 11 true / 9 false |
+| Extract Description Keyword | ✅ | 11 items avec keywords extraits |
+| UPSERT vendor_gl_mappings | ✅ | 11 insertions/updates |
+| Aggregate Results | ✅ | Agrégation des résultats |
+| Calculate New Checkpoint | ✅ | Nouveau timestamp calculé |
 
 ---
 
@@ -51,33 +74,47 @@ Le champ `type` dans les lignes BC est encodé :
 
 ```json
 {
-  "documentNo": "108219",
-  "lineNo": 10000,
-  "type": "G_x002F_L_x0020_Account",
-  "no": "6510",
-  "description": "Webhook",
-  "quantity": 1,
-  "directUnitCost": 44,
-  "amount": 44,
-  "shortcutDimension1Code": "754",
-  "shortcutDimension2Code": "",
-  "buyFromVendorNo": "20000",
-  "systemModifiedAt": "2025-12-19T12:00:27.68Z"
+  "@odata.context": "https://api.businesscentral.dynamics.com/...",
+  "value": {
+    "@odata.etag": "W/\"...\"",
+    "id": "d3978d39-feb9-f011-af69-6045bde99e23",
+    "documentNo": "108220",
+    "lineNo": 10000,
+    "type": "G_x002F_L_x0020_Account",
+    "no": "6510",
+    "description": "Webhook",
+    "description2": "",
+    "quantity": 1,
+    "directUnitCost": 44,
+    "lineAmount": 44,
+    "amount": 44,
+    "amountIncludingVAT": 44,
+    "unitOfMeasureCode": "",
+    "shortcutDimension1Code": "752",
+    "shortcutDimension2Code": "",
+    "dimensionSetID": 23,
+    "genBusPostingGroup": "EU",
+    "genProdPostingGroup": "HANDEL",
+    "vatBusPostingGroup": "EU",
+    "vatProdPostingGroup": "BETRIEB",
+    "buyFromVendorNo": "30000",
+    "systemModifiedAt": "2025-12-19T12:12:25.883Z"
+  }
 }
 ```
 
 ### Mapping vers vendor_gl_mappings
 
-| Champ BC | Colonne DB |
-|----------|------------|
-| `buyFromVendorNo` | `vendor_no` |
-| Depuis invoice header | `vendor_name` |
-| Premier mot de `description` | `description_keyword` |
-| `description` | `description_full` |
-| `no` | `gl_account_no` |
-| `shortcutDimension1Code` | `mandat_code` |
-| `shortcutDimension2Code` | `sous_mandat_code` |
-| `documentNo` | `source_document_no` |
+| Champ BC | Colonne DB | Accès |
+|----------|------------|-------|
+| `value.buyFromVendorNo` | `vendor_no` | `$json.value.buyFromVendorNo` |
+| `value.buyFromVendorNo` | `vendor_name` | (temporaire, à améliorer) |
+| Premier mot de `value.description` | `description_keyword` | Extrait par Code node |
+| `value.description` | `description_full` | `$json.descriptionFull` |
+| `value.no` | `gl_account_no` | `$json.value.no` |
+| `value.shortcutDimension1Code` | `mandat_code` | `$json.value.shortcutDimension1Code` |
+| `value.shortcutDimension2Code` | `sous_mandat_code` | `$json.value.shortcutDimension2Code` |
+| `value.documentNo` | `source_document_no` | `$json.value.documentNo` |
 
 ---
 
@@ -96,8 +133,8 @@ Le champ `type` dans les lignes BC est encodé :
                              FIN                                    ┌────────┴────────┐
                                                                     ▼                 ▼
                                                              [Split Invoices]   [No New Invoices]
-                                                                    │
-                                                                    ▼
+                                                                    │                  │
+                                                                    ▼                 FIN
                                                            [BC - Get Invoice Lines]
                                                                     │
                                                                     ▼
@@ -109,6 +146,7 @@ Le champ `type` dans les lignes BC est encodé :
                                                         ┌───────────┴───────────┐
                                                         ▼                       ▼
                                               [Extract Description]    [Skip Non-GL Lines]
+                                                   (11 items)              (9 items)
                                                         │
                                                         ▼
                                               [UPSERT vendor_gl_mappings]
@@ -126,51 +164,56 @@ Le champ `type` dans les lignes BC est encodé :
 
 ## Configuration des noeuds clés
 
-### Set - Capture Max Timestamp
-
-| Champ | Valeur |
-|-------|--------|
-| `max_timestamp` | `{{ $json.value[0].systemModifiedAt }}` |
-| `records_count` | `{{ $json.value.length }}` |
-| `invoices` | `{{ $json.value }}` |
-
-### Has New Invoices?
-
-- Condition : `{{ $json.records_count }}` > `0`
-
-### Split Invoices
-
-- Field to split : `invoices`
-
 ### Split Lines
 
-- Field to split : `value`
-- Include fields : `vendorNumber, vendorName, number, postingDate, systemModifiedAt`
+| Paramètre | Valeur |
+|-----------|--------|
+| Field to Split Out | `value` |
+| Include | **All Other Fields** |
+
+> ⚠️ Important : "All Other Fields" est nécessaire pour conserver `type`, `no`, `description`, etc.
 
 ### Is G/L Account Line?
 
-- Condition : `{{ $json.type }}` equals `G_x002F_L_x0020_Account`
+| Paramètre | Valeur |
+|-----------|--------|
+| Left Value | `{{ $json.value.type }}` |
+| Operation | `equals` |
+| Right Value | `G_x002F_L_x0020_Account` |
+
+> ⚠️ Important : Accéder via `$json.value.type` (pas `$json.type`)
 
 ### Extract Description Keyword (Code node)
 
 ```javascript
-const description = $input.item.json.description || '';
-const firstWord = description.split(/\s+/)[0].toLowerCase().trim();
+// Extract first word from description for keyword matching
+const items = $input.all();
+const results = [];
 
-const normalized = firstWord
-  .normalize('NFD')
-  .replace(/[\u0300-\u036f]/g, '')
-  .replace(/[^a-z0-9]/gi, '');
+for (const item of items) {
+  const description = item.json.value.description || '';
+  const firstWord = description.split(/\s+/)[0].toLowerCase().trim();
 
-return {
-  json: {
-    ...$input.item.json,
-    descriptionKeyword: normalized || 'unknown',
-    descriptionFull: description,
-    extractedAt: new Date().toISOString()
-  }
-};
+  // Normalize: remove accents, special chars
+  const normalized = firstWord
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/gi, '');
+
+  results.push({
+    json: {
+      ...item.json,
+      descriptionKeyword: normalized || 'unknown',
+      descriptionFull: description,
+      extractedAt: new Date().toISOString()
+    }
+  });
+}
+
+return results;
 ```
+
+> ⚠️ Important : Utiliser `$input.all()` et boucler sur tous les items
 
 ### UPSERT vendor_gl_mappings
 
@@ -193,17 +236,17 @@ INSERT INTO vendor_gl_mappings (
 )
 VALUES (
   (SELECT id FROM bc_companies LIMIT 1),
-  '{{ $json.vendorName.replace(/'/g, "''") }}',
-  '{{ $json.vendorNumber }}',
+  '{{ ($json.value.buyFromVendorNo || "").replace(/'/g, "''") }}',
+  '{{ $json.value.buyFromVendorNo || "" }}',
   '{{ $json.descriptionKeyword }}',
-  '{{ $json.descriptionFull.replace(/'/g, "''") }}',
-  '{{ $json.no }}',
-  '{{ $json.shortcutDimension1Code || '' }}',
-  '{{ $json.shortcutDimension2Code || '' }}',
+  '{{ ($json.descriptionFull || "").replace(/'/g, "''") }}',
+  '{{ $json.value.no || "" }}',
+  '{{ $json.value.shortcutDimension1Code || "" }}',
+  '{{ $json.value.shortcutDimension2Code || "" }}',
   0.90,
   1,
   NOW(),
-  '{{ $json.documentNo }}',
+  '{{ $json.value.documentNo || "" }}',
   NOW(),
   NOW()
 )
@@ -222,9 +265,11 @@ DO UPDATE SET
 RETURNING *;
 ```
 
+> ⚠️ Important : Tous les champs BC via `$json.value.*`, les champs extraits via `$json.descriptionKeyword`
+
 ---
 
-## Tables Neon PostgreSQL
+## Résultats en base de données
 
 ### sync_checkpoints
 
@@ -236,15 +281,21 @@ SELECT * FROM sync_checkpoints WHERE sync_type = 'rag_posted_invoices';
 |-------|--------|
 | last_processed_at | 2025-12-19T12:12:26.097Z |
 | records_processed | 20 |
-| total_records_processed | 40+ |
+| total_records_processed | 60+ |
 
-### vendor_gl_mappings
+### vendor_gl_mappings (9 enregistrements)
 
-```sql
-SELECT vendor_name, vendor_no, description_keyword, gl_account_no, mandat_code, confidence 
-FROM vendor_gl_mappings 
-ORDER BY created_at DESC;
-```
+| vendor_name | description_keyword | gl_account_no | mandat_code | confidence |
+|-------------|---------------------|---------------|-------------|------------|
+| 30000 | webhook | 6510 | 752 | 0.94 |
+| 20000 | webhook | 6510 | 754 | 0.90 |
+| V00060 | test | 6510 | 763 | 0.90 |
+| 20000 | periode | 6510 | 754 | 0.90 |
+| V00070 | fonds | 6510 | 764 | 0.90 |
+| V00080 | test | 6510 | 763 | 0.90 |
+| V00070 | laje | 50 04 00 02 | 783 | 0.90 |
+| V00060 | centre | 6510 | 763 | 0.94 |
+| 64000 | ausgaben | 60410 | - | 0.90 |
 
 ---
 
@@ -286,4 +337,14 @@ Donc `G/L Account` devient `G_x002F_L_x0020_Account` dans l'API.
 
 ---
 
-*Document mis à jour - 2025-12-19 20:00*
+## Améliorations futures
+
+1. **vendor_name** : Actuellement contient `buyFromVendorNo`. À améliorer pour récupérer le vrai nom depuis le header de facture via Split Lines.
+
+2. **Gestion multi-lignes** : Certaines factures peuvent avoir plusieurs lignes G/L - déjà géré par le workflow.
+
+3. **Confidence decay** : Implémenter une diminution de confiance pour les mappings non utilisés.
+
+---
+
+*Document mis à jour - 2025-12-19 21:50*
