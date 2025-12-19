@@ -15,11 +15,12 @@ Automatisation du traitement des factures QR suisses vers Microsoft Dynamics 365
 | Phase 1 | Infrastructure de base + intégration BC | ✅ Complète |
 | Phase 2 | RAG intelligent pour mapping mandats | ✅ Complète |
 | Phase 3 | Feedback loop auto-apprentissage | ✅ Complète |
-| Phase 4 | Attribution automatique G/L Account | 🔄 En cours |
+| Phase 4 | Attribution automatique G/L Account | ✅ Complète |
+| Phase 5 | RAG Polling depuis Posted Invoices | 🔄 En cours |
 
 ---
 
-## 🏗️ Architecture Complète (Phase 4)
+## 🏗️ Architecture Complète (Phase 5)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -64,6 +65,22 @@ Automatisation du traitement des factures QR suisses vers Microsoft Dynamics 365
 │             │                                                               │
 │             ▼                                                               │
 │  [Base RAG enrichie : mandat + G/L Account]                                │
+│             │                                                               │
+│             ▼ ★ NEW PHASE 5                                                 │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │ WORKFLOW 4: RAG Polling (Alternative au Webhook)                     │   │
+│  │                                                                      │   │
+│  │  [CRON 5min] → [Get Checkpoint] → [Query BC Posted Invoices]        │   │
+│  │       │                                │                             │   │
+│  │       │                                ▼                             │   │
+│  │       │           [Filter by SystemModifiedAt > last_processed_at]  │   │
+│  │       │                                │                             │   │
+│  │       │                                ▼                             │   │
+│  │       │           [Loop Each Invoice] → [UPSERT GL Mapping]         │   │
+│  │       │                                │                             │   │
+│  │       │                                ▼                             │   │
+│  │       └──────────────── [Update Checkpoint]                          │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -99,12 +116,14 @@ Le G/L Account dépend du fournisseur ET de la description de la prestation :
 
 ### Schéma
 
+> 📄 **Documentation complète** : [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md)
+
 ```sql
 -- Table référence sociétés BC
 bc_companies (
     id UUID PRIMARY KEY,
-    bc_company_id VARCHAR(50) UNIQUE,  -- ID Business Central
-    name VARCHAR(100),                  -- CIVAF, etc.
+    bc_company_id VARCHAR(50) UNIQUE,
+    name VARCHAR(100),
     tenant_id VARCHAR(50),
     environment VARCHAR(50),
     created_at TIMESTAMP DEFAULT NOW()
@@ -114,38 +133,39 @@ bc_companies (
 invoice_vendor_mappings (
     id UUID PRIMARY KEY,
     company_id UUID REFERENCES bc_companies(id),
-    vendor_name VARCHAR(200),           -- SERAFE AG, etc.
-    debtor_name VARCHAR(200),           -- David Esteves Beles (CLÉ PRINCIPALE)
-    client_numero VARCHAR(50),          -- 602.201
-    iban VARCHAR(34),                   -- CH893000520211491010B
-    mandat_bc VARCHAR(20),              -- 93622
+    vendor_name VARCHAR(200),
+    debtor_name VARCHAR(200),           -- CLÉ PRINCIPALE
+    client_numero VARCHAR(50),
+    iban VARCHAR(34),
+    mandat_bc VARCHAR(20),
     sous_mandat_bc VARCHAR(20),
-    confidence DECIMAL(3,2),            -- 0.00 à 1.00
+    confidence DECIMAL(3,2),
     usage_count INTEGER DEFAULT 1,
-    last_used TIMESTAMP DEFAULT NOW(),
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(company_id, debtor_name)     -- Contrainte sur debtor_name
+    last_used TIMESTAMP,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    UNIQUE(company_id, debtor_name)
 )
 
--- Table mappings vendor + description → G/L Account (Phase 4)
+-- Table mappings vendor + description → G/L Account (Phase 4+5)
 vendor_gl_mappings (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
     company_id UUID REFERENCES bc_companies(id),
     vendor_name VARCHAR(200) NOT NULL,
-    description_keyword VARCHAR(100) NOT NULL,  -- "Honoraires", "Débours"
-    gl_account_no VARCHAR(20) NOT NULL,         -- "25 01 00 02" ou "6200"
+    vendor_no VARCHAR(20),              -- ★ NEW Phase 5: BC Vendor No
+    description_keyword VARCHAR(100) NOT NULL,
+    description_full TEXT,              -- ★ NEW Phase 5: Full description
+    gl_account_no VARCHAR(20) NOT NULL,
+    mandat_code VARCHAR(20),            -- ★ NEW Phase 5: MANDAT dimension
+    sous_mandat_code VARCHAR(20),       -- ★ NEW Phase 5: SOUS-MANDAT dimension
+    source_document_no VARCHAR(20),     -- ★ NEW Phase 5: Source invoice
     confidence DECIMAL(3,2) DEFAULT 0.90,
     usage_count INTEGER DEFAULT 1,
-    last_used TIMESTAMP DEFAULT NOW(),
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW(),
+    last_used TIMESTAMP,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
     UNIQUE(company_id, vendor_name, description_keyword)
 )
-
--- Index pour recherche rapide
-CREATE INDEX idx_vendor_gl_lookup 
-ON vendor_gl_mappings(company_id, vendor_name);
 
 -- Table contexte temporaire (Phase 3)
 pending_invoice_context (
@@ -153,6 +173,21 @@ pending_invoice_context (
     debtor_name VARCHAR(200) NOT NULL,
     vendor_name VARCHAR(200),
     created_at TIMESTAMP DEFAULT NOW()
+)
+
+-- ★ NEW Phase 5: Table checkpoints polling
+sync_checkpoints (
+    id SERIAL PRIMARY KEY,
+    sync_type VARCHAR(50) UNIQUE NOT NULL,
+    company_id UUID REFERENCES bc_companies(id),
+    last_processed_at TIMESTAMPTZ NOT NULL DEFAULT '1900-01-01',
+    last_document_no VARCHAR(20),
+    records_processed INTEGER DEFAULT 0,
+    total_records_processed BIGINT DEFAULT 0,
+    last_error TEXT,
+    last_success_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()  -- Auto-updated via trigger
 )
 ```
 
@@ -195,122 +230,57 @@ LIMIT 1
 
 ---
 
-## 🔄 Phase 4 : Attribution G/L Account
+## 🔄 Phase 5 : RAG Polling depuis Posted Invoices
 
-### Principe
+### Problématique
 
-Le compte comptable (G/L Account) dépend de :
-- **vendor_name** : le fournisseur
-- **description_keyword** : un mot-clé dans la description/libellé de la facture
+Le Workflow 3 (RAG Learning via Webhook BC) fonctionne, mais :
+- Nécessite une extension AL avec événement OnAfterPost
+- Dépend de la stabilité du webhook
+- Pas de rattrapage si webhook manqué
 
-Exemple : Une facture du CENTRE PATRONAL avec "Honoraires" dans la description → compte `25 01 00 02`
+### Solution : Polling API BC
 
-### Workflow 1 : RAG Lookup GL
+Workflow 4 qui interroge périodiquement les factures comptabilisées via l'API BC standard.
 
-Nouveau node ajouté après RAG Lookup Mandat :
-
-```
-[RAG Lookup Mandat] → [RAG Lookup GL] → [IF Confidence Mandat]
-```
-
-**Données propagées vers Redis :**
-
-```json
-{
-  "vendorName": "CENTRE PATRONAL",
-  "amount": "1500.00",
-  "reference": "000000000000000000000000000",
-  "mandat_bc": "93622",
-  "rag_confidence": 0.95,
-  "gl_account_no": "25 01 00 02",
-  "gl_confidence": 0.90,
-  "description": "Honoraires conseil juridique",
-  "needs_review": false
-}
-```
-
-### Workflow 3 : UPSERT GL Mapping
-
-Après l'UPSERT du mapping mandat, on fait l'UPSERT du GL :
+### Table sync_checkpoints
 
 ```sql
-INSERT INTO vendor_gl_mappings (
-    company_id,
-    vendor_name,
-    description_keyword,
-    gl_account_no
-)
-SELECT 
-    c.id,
-    '{{ $json.body.vendorName }}',
-    '{{ $json.body.lineDescription }}',
-    '{{ $json.body.glAccountNo }}'
-FROM bc_companies c
-WHERE c.bc_company_id = 'd0854afd-fdb9-ef11-8a6a-7c1e5246cd4e'
-  AND '{{ $json.body.glAccountNo }}' <> ''
-ON CONFLICT (company_id, vendor_name, description_keyword)
-DO UPDATE SET
-    gl_account_no = EXCLUDED.gl_account_no,
-    confidence = LEAST(1.0, vendor_gl_mappings.confidence + 0.05),
-    usage_count = vendor_gl_mappings.usage_count + 1,
-    last_used = NOW(),
-    updated_at = NOW()
-RETURNING *
+-- Checkpoint initial
+INSERT INTO sync_checkpoints (sync_type, last_processed_at)
+VALUES ('rag_posted_invoices', '1900-01-01T00:00:00Z');
 ```
 
-### Extension AL : PostedInvoiceWebhook.al (v1.4.2.0)
+### Query BC Posted Purchase Invoices
 
-```al
-codeunit 50110 "Posted Invoice Webhook"
-{
-    [EventSubscriber(ObjectType::Codeunit, Codeunit::"Purch.-Post", 'OnAfterPostPurchaseDoc', '', false, false)]
-    local procedure OnAfterPostPurchaseInvoice(...)
-    var
-        LineDescription: Text[100];
-        LineGLAccountNo: Code[20];
-    begin
-        // ... existing code ...
-        
-        // Get first invoice line data
-        PurchInvLine.SetRange("Document No.", PurchInvHdrNo);
-        if PurchInvLine.FindFirst() then begin
-            // Get line description
-            LineDescription := PurchInvLine.Description;
-            
-            // Get G/L Account - only if line type is G/L Account
-            // TODO: For Item lines, would need to lookup G/L from Item Posting Group
-            if PurchInvLine.Type = PurchInvLine.Type::"G/L Account" then
-                LineGLAccountNo := PurchInvLine."No.";
-            
-            // Get dimensions...
-        end;
-
-        // Build JSON payload with new fields
-        JsonPayload.Add('lineDescription', LineDescription);
-        JsonPayload.Add('glAccountNo', LineGLAccountNo);
-        // ... rest of payload ...
-    end;
-}
+```
+GET /v2.0/{tenant}/Production/api/v2.0/companies({companyId})/purchaseInvoices
+  ?$filter=status eq 'Paid' or status eq 'Open'
+           and systemModifiedAt gt {last_processed_at}
+  &$orderby=systemModifiedAt asc
+  &$top=50
+  &$expand=purchaseInvoiceLines
 ```
 
-**Payload JSON enrichi :**
+### Workflow 4 Structure
 
-```json
-{
-  "event": "invoice_posted",
-  "invoiceNo": "FACTURE-001",
-  "vendorNo": "V00123",
-  "vendorName": "CENTRE PATRONAL",
-  "vendorIBAN": "CH89...",
-  "amount": 1500.00,
-  "paymentReference": "000000000000000000000000000",
-  "mandatCode": "93622",
-  "sousMandatCode": "",
-  "lineDescription": "Honoraires conseil juridique",
-  "glAccountNo": "25 01 00 02",
-  "postingDate": "2025-12-13"
-}
-```
+1. **Trigger** : CRON every 5 minutes
+2. **Get Checkpoint** : Read `last_processed_at` from sync_checkpoints
+3. **Query BC API** : Fetch invoices WHERE systemModifiedAt > checkpoint
+4. **Loop Each Invoice** :
+   - Extract vendor_name, vendor_no, line descriptions, G/L accounts, dimensions
+   - UPSERT into vendor_gl_mappings with new columns
+5. **Update Checkpoint** : Set `last_processed_at` = max(systemModifiedAt)
+
+### Nouvelles colonnes vendor_gl_mappings
+
+| Colonne | Usage |
+|---------|-------|
+| `vendor_no` | Lookup BC par numéro fournisseur |
+| `description_full` | Description complète pour audit |
+| `mandat_code` | Dimension MANDAT de la ligne |
+| `sous_mandat_code` | Dimension SOUS-MANDAT |
+| `source_document_no` | Numéro facture d'origine |
 
 ---
 
@@ -326,19 +296,21 @@ codeunit 50110 "Posted Invoice Webhook"
 | Infomaniak LLM | ✅ | Fallback si RAG < 0.8 (llama3, hébergé Suisse) |
 | Redis Queue | ✅ | Découplage Extraction ↔ BC Connector |
 | Workflow 1: Extraction | ✅ | OCR + RAG Mandat + RAG GL + LLM fallback + Redis |
-| Workflow 2: BC Connector | 🔄 | Pop Redis + OAuth + Vendor + Invoice + Line avec GL |
+| Workflow 2: BC Connector | ✅ | Pop Redis + OAuth + Vendor + Invoice + Line avec GL |
 | Workflow 3: RAG Learning | ✅ | Webhook BC → UPSERT Mandat + UPSERT GL → Cleanup |
-| AL Extension v1.4.2.0 | 🔄 | APIs custom + PostedInvoiceWebhook avec GL |
+| Workflow 4: RAG Polling | 🔄 | CRON → Query BC → UPSERT GL avec dimensions |
+| AL Extension v1.4.2.0 | ✅ | APIs custom + PostedInvoiceWebhook avec GL |
 
 ---
 
 ## 🔗 Workflows n8n
 
-| Workflow | URL Webhook | Description |
-|----------|-------------|-------------|
-| QR-Reader - LLM - Redis | /webhook/qr-reader | Extraction, RAG mandat + GL, mapping |
-| BC Connector | (trigger Redis) | Création facture BC avec G/L Account |
-| RAG Learning - Invoice Posted | /webhook/rag-learning | Auto-apprentissage mandat + GL |
+| Workflow | Trigger | Description |
+|----------|---------|-------------|
+| QR-Reader - LLM - Redis | Webhook `/qr-reader` | Extraction, RAG mandat + GL, mapping |
+| BC Connector | Redis RPOP | Création facture BC avec G/L Account |
+| RAG Learning - Invoice Posted | Webhook `/rag-learning` | Auto-apprentissage via webhook BC |
+| RAG Polling - Posted Invoices | CRON 5min | ★ NEW: Apprentissage via polling API BC |
 
 ---
 
@@ -352,26 +324,39 @@ codeunit 50110 "Posted Invoice Webhook"
 | 2025-12-12 | Phase 3 UPSERT + cleanup | ✅ confidence 0.90→0.95, pending supprimé |
 | 2025-12-13 | Phase 4 - Table vendor_gl_mappings | ✅ Table créée dans Neon |
 | 2025-12-13 | Phase 4 - RAG Lookup GL Workflow 1 | ✅ Node ajouté |
+| 2025-12-19 | Phase 5 - Table sync_checkpoints | ✅ Table créée, trigger ajouté |
+| 2025-12-19 | Phase 5 - ALTER vendor_gl_mappings | ✅ 5 colonnes ajoutées + index |
 
 ---
 
 ## 🚀 Prochaines étapes
 
-### Phase 4 (en cours)
-- [x] Créer table `vendor_gl_mappings`
-- [x] Ajouter node RAG Lookup GL au Workflow 1
-- [x] Modifier node "Set Use RAG mandat" pour inclure gl_account_no
-- [ ] Modifier Workflow 2 pour utiliser gl_account_no dans la ligne
-- [ ] Mettre à jour extension AL (v1.4.2.0) avec lineDescription + glAccountNo
-- [ ] Ajouter UPSERT GL au Workflow 3
-- [ ] Test end-to-end Phase 4
+### Phase 5 (en cours)
+- [x] Créer table `sync_checkpoints`
+- [x] Ajouter colonnes à `vendor_gl_mappings` (vendor_no, mandat_code, etc.)
+- [x] Créer index sur `(company_id, vendor_no)`
+- [x] Documenter schéma dans DATABASE_SCHEMA.md
+- [ ] Créer Workflow 4 : RAG Polling
+- [ ] Configurer query BC API Posted Invoices
+- [ ] Implémenter boucle UPSERT avec dimensions
+- [ ] Test end-to-end Phase 5
 
 ### Améliorations futures
-- [ ] Multi-sociétés : ajouter companyId dynamique dans le payload AL
+- [ ] Multi-sociétés : boucle sur toutes les companies dans sync_checkpoints
 - [ ] Monitoring : dashboard des mappings RAG et leur évolution
 - [ ] Cleanup automatique : CRON pour supprimer les pending_invoice_context > 7 jours
-- [ ] Gestion des erreurs : retry/dead letter queue si webhook échoue
+- [ ] Gestion des erreurs : retry/dead letter queue si API BC échoue
+- [ ] Webhooks + Polling : mode hybride pour redondance
 
 ---
 
-*Dernière mise à jour : 2025-12-13*
+## 📁 Fichiers de migration
+
+| Fichier | Description |
+|---------|-------------|
+| [`migrations/001_create_sync_checkpoints.sql`](../migrations/001_create_sync_checkpoints.sql) | Création table + trigger + checkpoint initial |
+| [`migrations/002_alter_vendor_gl_mappings.sql`](../migrations/002_alter_vendor_gl_mappings.sql) | Ajout colonnes vendor_no, dimensions, traceability |
+
+---
+
+*Dernière mise à jour : 2025-12-19*
