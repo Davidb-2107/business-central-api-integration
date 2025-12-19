@@ -48,6 +48,10 @@ Le noeud "Extract Description Keyword" doit traiter tous les items avec `$input.
 
 Les lignes de facture ne contiennent que `buyFromVendorNo`. Le vrai nom du fournisseur (`vendorName`) est enrichi depuis le header via le noeud "Enrich Lines with Header".
 
+### 5. Gestion du timestamp null (pas de nouvelles factures)
+
+Quand il n'y a pas de nouvelles factures, `max_timestamp` est `null`. La requête SQL doit gérer ce cas avec `COALESCE` et `NULLIF` pour éviter l'erreur `invalid input syntax for type timestamp`.
+
 ---
 
 ## État actuel : WORKFLOW FONCTIONNEL ✅
@@ -61,7 +65,7 @@ Les lignes de facture ne contiennent que `buyFromVendorNo`. Le vrai nom du fourn
 | Get Token OAuth 2.0 | ✅ | Token BC valide |
 | BC - Get Posted Invoices | ✅ | 20 factures (108201-108220) |
 | Set - Capture Max Timestamp | ✅ | `max_timestamp`, `records_count`, `invoices` |
-| Update Checkpoint Simple | ✅ | Checkpoint mis à jour |
+| Update Checkpoint Simple | ✅ | Checkpoint mis à jour (gère null) |
 | Has New Invoices? | ✅ | Condition sur `records_count > 0` |
 | Split Invoices | ✅ | 20 items individuels |
 | BC - Get Invoice Lines | ✅ | 20 appels API, lignes récupérées |
@@ -164,7 +168,28 @@ Après le noeud "Enrich Lines with Header", chaque ligne contient les infos du h
 
 ## Configuration des noeuds clés
 
-### Enrich Lines with Header (Code node) - NOUVEAU
+### Update Checkpoint Simple
+
+Gère le cas où il n'y a pas de nouvelles factures (`max_timestamp` = null) :
+
+```sql
+UPDATE sync_checkpoints
+SET 
+  last_processed_at = COALESCE(
+    NULLIF('{{ $json.max_timestamp }}', 'null')::timestamp with time zone,
+    last_processed_at
+  ),
+  records_processed = {{ $json.records_count || 0 }},
+  total_records_processed = total_records_processed + {{ $json.records_count || 0 }},
+  last_success_at = NOW(),
+  last_error = NULL
+WHERE sync_type = 'rag_posted_invoices'
+RETURNING *;
+```
+
+> ⚠️ Important : `NULLIF` convertit la string `'null'` en vrai NULL, puis `COALESCE` garde l'ancienne valeur si NULL.
+
+### Enrich Lines with Header (Code node)
 
 Enrichit chaque ligne avec les informations du header de facture (vendorName, etc.) :
 
@@ -311,7 +336,7 @@ SELECT * FROM sync_checkpoints WHERE sync_type = 'rag_posted_invoices';
 |-------|--------|
 | last_processed_at | 2025-12-19T12:12:26.097Z |
 | records_processed | 20 |
-| total_records_processed | 80+ |
+| total_records_processed | 100+ |
 
 ### vendor_gl_mappings (9 enregistrements)
 
@@ -371,10 +396,12 @@ Donc `G/L Account` devient `G_x002F_L_x0020_Account` dans l'API.
 
 1. ~~**vendor_name** : Actuellement contient `buyFromVendorNo`. À améliorer pour récupérer le vrai nom depuis le header de facture via Split Lines.~~ ✅ **RÉSOLU**
 
-2. **Gestion multi-lignes** : Certaines factures peuvent avoir plusieurs lignes G/L - déjà géré par le workflow.
+2. ~~**Gestion timestamp null** : Erreur quand pas de nouvelles factures.~~ ✅ **RÉSOLU**
 
-3. **Confidence decay** : Implémenter une diminution de confiance pour les mappings non utilisés.
+3. **Gestion multi-lignes** : Certaines factures peuvent avoir plusieurs lignes G/L - déjà géré par le workflow.
+
+4. **Confidence decay** : Implémenter une diminution de confiance pour les mappings non utilisés.
 
 ---
 
-*Document mis à jour - 2025-12-19 22:10*
+*Document mis à jour - 2025-12-19 22:20*
