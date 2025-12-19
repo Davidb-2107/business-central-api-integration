@@ -12,9 +12,24 @@ Workflow n8n qui poll les factures comptabilisées depuis Business Central pour 
 
 ---
 
-## État actuel : DEBUG EN COURS
+## 🎯 PROBLÈME RÉSOLU
 
-### ✅ Noeuds validés
+### Encodage OData du champ `type`
+
+Le champ `type` dans les lignes BC est encodé :
+
+| Valeur BC | Valeur API OData |
+|-----------|------------------|
+| `G/L Account` | `G_x002F_L_x0020_Account` |
+| `Item` | `Item` |
+
+**Correction appliquée** : Dans le node "Is G/L Account Line?", utiliser `G_x002F_L_x0020_Account` au lieu de `G/L Account`.
+
+---
+
+## État actuel : WORKFLOW FONCTIONNEL
+
+### ✅ Tous les noeuds validés
 
 | Noeud | Status | Output |
 |-------|--------|--------|
@@ -27,15 +42,42 @@ Workflow n8n qui poll les factures comptabilisées depuis Business Central pour 
 | Has New Invoices? | ✅ | Condition sur `records_count > 0` |
 | Split Invoices | ✅ | 20 items individuels |
 | BC - Get Invoice Lines | ✅ | 20 appels API, lignes récupérées |
+| Split Lines | ✅ | Lignes individuelles |
+| Is G/L Account Line? | ✅ | Condition: `type == "G_x002F_L_x0020_Account"` |
 
-### 🔄 À valider
+---
 
-| Noeud | Action |
-|-------|--------|
-| Split Lines | Vérifier que les lignes sont splittées correctement |
-| Is G/L Account Line? | Vérifier la condition `type == "G/L Account"` |
-| Extract Description Keyword | Vérifier l'extraction du keyword |
-| UPSERT vendor_gl_mappings | Vérifier l'insertion en DB |
+## Structure d'une ligne BC (exemple)
+
+```json
+{
+  "documentNo": "108219",
+  "lineNo": 10000,
+  "type": "G_x002F_L_x0020_Account",
+  "no": "6510",
+  "description": "Webhook",
+  "quantity": 1,
+  "directUnitCost": 44,
+  "amount": 44,
+  "shortcutDimension1Code": "754",
+  "shortcutDimension2Code": "",
+  "buyFromVendorNo": "20000",
+  "systemModifiedAt": "2025-12-19T12:00:27.68Z"
+}
+```
+
+### Mapping vers vendor_gl_mappings
+
+| Champ BC | Colonne DB |
+|----------|------------|
+| `buyFromVendorNo` | `vendor_no` |
+| Depuis invoice header | `vendor_name` |
+| Premier mot de `description` | `description_keyword` |
+| `description` | `description_full` |
+| `no` | `gl_account_no` |
+| `shortcutDimension1Code` | `mandat_code` |
+| `shortcutDimension2Code` | `sous_mandat_code` |
+| `documentNo` | `source_document_no` |
 
 ---
 
@@ -107,41 +149,84 @@ Workflow n8n qui poll les factures comptabilisées depuis Business Central pour 
 
 ### Is G/L Account Line?
 
-- Condition : `{{ $json.type }}` equals `G/L Account`
+- Condition : `{{ $json.type }}` equals `G_x002F_L_x0020_Account`
 
----
+### Extract Description Keyword (Code node)
 
-## Problème potentiel à investiguer
+```javascript
+const description = $input.item.json.description || '';
+const firstWord = description.split(/\s+/)[0].toLowerCase().trim();
 
-Dans le noeud **"Is G/L Account Line?"**, vérifier :
+const normalized = firstWord
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/[^a-z0-9]/gi, '');
 
-1. **Le champ `type` existe-t-il ?** - Afficher l'output de "Split Lines" pour voir la structure
-2. **Quelle est la valeur de `type` ?** - Peut-être `"G/L Account"` ou `"GL Account"` ou autre
-3. **Y a-t-il des lignes G/L dans les factures testées ?** - Les factures 108211-108220 devraient en avoir
+return {
+  json: {
+    ...$input.item.json,
+    descriptionKeyword: normalized || 'unknown',
+    descriptionFull: description,
+    extractedAt: new Date().toISOString()
+  }
+};
+```
 
-### Debug : Output attendu de "Split Lines"
+### UPSERT vendor_gl_mappings
 
-```json
-{
-  "documentNo": "108211",
-  "lineNo": 10000,
-  "type": "G/L Account",    // <-- CE CHAMP EST CRITIQUE
-  "no": "6200",             // Numéro de compte G/L
-  "description": "Honoraires conseil",
-  "quantity": 1,
-  "unitPrice": 18250,
-  "amount": 18250,
-  "shortcutDimension1Code": "93622",
-  "shortcutDimension2Code": "",
-  ...
-}
+```sql
+INSERT INTO vendor_gl_mappings (
+  company_id,
+  vendor_name,
+  vendor_no,
+  description_keyword,
+  description_full,
+  gl_account_no,
+  mandat_code,
+  sous_mandat_code,
+  confidence,
+  usage_count,
+  last_used,
+  source_document_no,
+  created_at,
+  updated_at
+)
+VALUES (
+  (SELECT id FROM bc_companies LIMIT 1),
+  '{{ $json.vendorName.replace(/'/g, "''") }}',
+  '{{ $json.vendorNumber }}',
+  '{{ $json.descriptionKeyword }}',
+  '{{ $json.descriptionFull.replace(/'/g, "''") }}',
+  '{{ $json.no }}',
+  '{{ $json.shortcutDimension1Code || '' }}',
+  '{{ $json.shortcutDimension2Code || '' }}',
+  0.90,
+  1,
+  NOW(),
+  '{{ $json.documentNo }}',
+  NOW(),
+  NOW()
+)
+ON CONFLICT (company_id, vendor_name, description_keyword)
+DO UPDATE SET
+  vendor_no = EXCLUDED.vendor_no,
+  gl_account_no = EXCLUDED.gl_account_no,
+  mandat_code = EXCLUDED.mandat_code,
+  sous_mandat_code = EXCLUDED.sous_mandat_code,
+  description_full = EXCLUDED.description_full,
+  usage_count = vendor_gl_mappings.usage_count + 1,
+  confidence = LEAST(0.99, vendor_gl_mappings.confidence + 0.02),
+  last_used = NOW(),
+  source_document_no = EXCLUDED.source_document_no,
+  updated_at = NOW()
+RETURNING *;
 ```
 
 ---
 
 ## Tables Neon PostgreSQL
 
-### sync_checkpoints (état actuel)
+### sync_checkpoints
 
 ```sql
 SELECT * FROM sync_checkpoints WHERE sync_type = 'rag_posted_invoices';
@@ -153,22 +238,13 @@ SELECT * FROM sync_checkpoints WHERE sync_type = 'rag_posted_invoices';
 | records_processed | 20 |
 | total_records_processed | 40+ |
 
-### vendor_gl_mappings (à peupler)
+### vendor_gl_mappings
 
 ```sql
-SELECT * FROM vendor_gl_mappings;
--- Actuellement vide - sera peuplé quand le workflow fonctionne
+SELECT vendor_name, vendor_no, description_keyword, gl_account_no, mandat_code, confidence 
+FROM vendor_gl_mappings 
+ORDER BY created_at DESC;
 ```
-
----
-
-## Prochaines étapes
-
-1. **Afficher l'output de "Split Lines"** pour voir la structure des lignes
-2. **Vérifier le champ `type`** dans les lignes BC
-3. **Ajuster la condition** si le champ a un nom différent
-4. **Valider l'UPSERT** dans vendor_gl_mappings
-5. **Tester le workflow complet**
 
 ---
 
@@ -179,7 +255,7 @@ SELECT * FROM vendor_gl_mappings;
 | `customPostedPurchaseInvoices` | Liste des factures comptabilisées |
 | `customPostedPurchaseInvoiceLines` | Lignes d'une facture (filtré par documentNo) |
 
-### Query parameters actuels
+### Query parameters
 
 ```
 $filter=systemModifiedAt gt {checkpoint}
@@ -198,4 +274,16 @@ $top=20
 
 ---
 
-*Document créé pour continuité de debug - 2025-12-19*
+## Encodages OData à retenir
+
+| Caractère | Encodage OData |
+|-----------|----------------|
+| `/` | `_x002F_` |
+| ` ` (espace) | `_x0020_` |
+| `'` | `_x0027_` |
+
+Donc `G/L Account` devient `G_x002F_L_x0020_Account` dans l'API.
+
+---
+
+*Document mis à jour - 2025-12-19 20:00*
