@@ -44,6 +44,10 @@ L'API retourne les données dans un objet `value`, donc tous les champs doivent 
 
 Le noeud "Extract Description Keyword" doit traiter tous les items avec `$input.all()`, pas seulement le premier.
 
+### 4. Propagation du vendorName depuis le header
+
+Les lignes de facture ne contiennent que `buyFromVendorNo`. Le vrai nom du fournisseur (`vendorName`) est enrichi depuis le header via le noeud "Enrich Lines with Header".
+
 ---
 
 ## État actuel : WORKFLOW FONCTIONNEL ✅
@@ -61,6 +65,7 @@ Le noeud "Extract Description Keyword" doit traiter tous les items avec `$input.
 | Has New Invoices? | ✅ | Condition sur `records_count > 0` |
 | Split Invoices | ✅ | 20 items individuels |
 | BC - Get Invoice Lines | ✅ | 20 appels API, lignes récupérées |
+| **Enrich Lines with Header** | ✅ | Ajoute vendorName depuis le header |
 | Split Lines | ✅ | 20 lignes (Include: All Other Fields) |
 | Is G/L Account Line? | ✅ | 11 true / 9 false |
 | Extract Description Keyword | ✅ | 11 items avec keywords extraits |
@@ -70,34 +75,26 @@ Le noeud "Extract Description Keyword" doit traiter tous les items avec `$input.
 
 ---
 
-## Structure d'une ligne BC (exemple)
+## Structure d'une ligne BC enrichie (exemple)
+
+Après le noeud "Enrich Lines with Header", chaque ligne contient les infos du header :
 
 ```json
 {
   "@odata.context": "https://api.businesscentral.dynamics.com/...",
   "value": {
-    "@odata.etag": "W/\"...\"",
-    "id": "d3978d39-feb9-f011-af69-6045bde99e23",
     "documentNo": "108220",
     "lineNo": 10000,
     "type": "G_x002F_L_x0020_Account",
     "no": "6510",
     "description": "Webhook",
-    "description2": "",
-    "quantity": 1,
-    "directUnitCost": 44,
-    "lineAmount": 44,
-    "amount": 44,
-    "amountIncludingVAT": 44,
-    "unitOfMeasureCode": "",
     "shortcutDimension1Code": "752",
     "shortcutDimension2Code": "",
-    "dimensionSetID": 23,
-    "genBusPostingGroup": "EU",
-    "genProdPostingGroup": "HANDEL",
-    "vatBusPostingGroup": "EU",
-    "vatProdPostingGroup": "BETRIEB",
     "buyFromVendorNo": "30000",
+    "vendorName": "Graphic Design Institute",
+    "vendorNumber": "30000",
+    "invoiceNumber": "108220",
+    "postingDate": "2025-05-01",
     "systemModifiedAt": "2025-12-19T12:12:25.883Z"
   }
 }
@@ -107,8 +104,8 @@ Le noeud "Extract Description Keyword" doit traiter tous les items avec `$input.
 
 | Champ BC | Colonne DB | Accès |
 |----------|------------|-------|
+| `value.vendorName` | `vendor_name` | `$json.value.vendorName` |
 | `value.buyFromVendorNo` | `vendor_no` | `$json.value.buyFromVendorNo` |
-| `value.buyFromVendorNo` | `vendor_name` | (temporaire, à améliorer) |
 | Premier mot de `value.description` | `description_keyword` | Extrait par Code node |
 | `value.description` | `description_full` | `$json.descriptionFull` |
 | `value.no` | `gl_account_no` | `$json.value.no` |
@@ -138,6 +135,9 @@ Le noeud "Extract Description Keyword" doit traiter tous les items avec `$input.
                                                            [BC - Get Invoice Lines]
                                                                     │
                                                                     ▼
+                                                        [Enrich Lines with Header]
+                                                                    │
+                                                                    ▼
                                                               [Split Lines]
                                                                     │
                                                                     ▼
@@ -164,6 +164,42 @@ Le noeud "Extract Description Keyword" doit traiter tous les items avec `$input.
 
 ## Configuration des noeuds clés
 
+### Enrich Lines with Header (Code node) - NOUVEAU
+
+Enrichit chaque ligne avec les informations du header de facture (vendorName, etc.) :
+
+```javascript
+const items = $input.all();
+const results = [];
+
+for (let i = 0; i < items.length; i++) {
+  const linesResponse = items[i].json;
+  const invoiceHeader = $('Split Invoices').all()[i].json;
+  
+  // Ajouter les infos du header à chaque ligne
+  if (linesResponse.value && Array.isArray(linesResponse.value)) {
+    const enrichedLines = linesResponse.value.map(line => ({
+      ...line,
+      vendorName: invoiceHeader.vendorName,
+      vendorNumber: invoiceHeader.vendorNumber,
+      invoiceNumber: invoiceHeader.number,
+      postingDate: invoiceHeader.postingDate
+    }));
+    
+    results.push({
+      json: {
+        ...linesResponse,
+        value: enrichedLines
+      }
+    });
+  } else {
+    results.push(items[i]);
+  }
+}
+
+return results;
+```
+
 ### Split Lines
 
 | Paramètre | Valeur |
@@ -171,7 +207,7 @@ Le noeud "Extract Description Keyword" doit traiter tous les items avec `$input.
 | Field to Split Out | `value` |
 | Include | **All Other Fields** |
 
-> ⚠️ Important : "All Other Fields" est nécessaire pour conserver `type`, `no`, `description`, etc.
+> ⚠️ Important : "All Other Fields" est nécessaire pour conserver `type`, `no`, `description`, `vendorName`, etc.
 
 ### Is G/L Account Line?
 
@@ -180,8 +216,6 @@ Le noeud "Extract Description Keyword" doit traiter tous les items avec `$input.
 | Left Value | `{{ $json.value.type }}` |
 | Operation | `equals` |
 | Right Value | `G_x002F_L_x0020_Account` |
-
-> ⚠️ Important : Accéder via `$json.value.type` (pas `$json.type`)
 
 ### Extract Description Keyword (Code node)
 
@@ -213,8 +247,6 @@ for (const item of items) {
 return results;
 ```
 
-> ⚠️ Important : Utiliser `$input.all()` et boucler sur tous les items
-
 ### UPSERT vendor_gl_mappings
 
 ```sql
@@ -236,7 +268,7 @@ INSERT INTO vendor_gl_mappings (
 )
 VALUES (
   (SELECT id FROM bc_companies LIMIT 1),
-  '{{ ($json.value.buyFromVendorNo || "").replace(/'/g, "''") }}',
+  '{{ ($json.value.vendorName || "").replace(/'/g, "''") }}',
   '{{ $json.value.buyFromVendorNo || "" }}',
   '{{ $json.descriptionKeyword }}',
   '{{ ($json.descriptionFull || "").replace(/'/g, "''") }}',
@@ -265,8 +297,6 @@ DO UPDATE SET
 RETURNING *;
 ```
 
-> ⚠️ Important : Tous les champs BC via `$json.value.*`, les champs extraits via `$json.descriptionKeyword`
-
 ---
 
 ## Résultats en base de données
@@ -281,21 +311,21 @@ SELECT * FROM sync_checkpoints WHERE sync_type = 'rag_posted_invoices';
 |-------|--------|
 | last_processed_at | 2025-12-19T12:12:26.097Z |
 | records_processed | 20 |
-| total_records_processed | 60+ |
+| total_records_processed | 80+ |
 
 ### vendor_gl_mappings (9 enregistrements)
 
-| vendor_name | description_keyword | gl_account_no | mandat_code | confidence |
-|-------------|---------------------|---------------|-------------|------------|
-| 30000 | webhook | 6510 | 752 | 0.94 |
-| 20000 | webhook | 6510 | 754 | 0.90 |
-| V00060 | test | 6510 | 763 | 0.90 |
-| 20000 | periode | 6510 | 754 | 0.90 |
-| V00070 | fonds | 6510 | 764 | 0.90 |
-| V00080 | test | 6510 | 763 | 0.90 |
-| V00070 | laje | 50 04 00 02 | 783 | 0.90 |
-| V00060 | centre | 6510 | 763 | 0.94 |
-| 64000 | ausgaben | 60410 | - | 0.90 |
+| vendor_name | vendor_no | description_keyword | gl_account_no | mandat_code | confidence |
+|-------------|-----------|---------------------|---------------|-------------|------------|
+| Graphic Design Institute | 30000 | webhook | 6510 | 752 | 0.90 |
+| First Up Consultants | 20000 | webhook | 6510 | 754 | 0.90 |
+| CENTRE PATRONAL | V00060 | test | 6510 | 763 | 0.90 |
+| First Up Consultants | 20000 | periode | 6510 | 754 | 0.90 |
+| Fonds de surcompensation | V00070 | fonds | 6510 | 764 | 0.90 |
+| SERAFE AG | V00080 | test | 6510 | 763 | 0.90 |
+| Fonds de surcompensation | V00070 | laje | 50 04 00 02 | 783 | 0.90 |
+| CENTRE PATRONAL | V00060 | centre | 6510 | 763 | 0.94 |
+| Wasserkraftwerk | 64000 | ausgaben | 60410 | - | 0.90 |
 
 ---
 
@@ -339,7 +369,7 @@ Donc `G/L Account` devient `G_x002F_L_x0020_Account` dans l'API.
 
 ## Améliorations futures
 
-1. **vendor_name** : Actuellement contient `buyFromVendorNo`. À améliorer pour récupérer le vrai nom depuis le header de facture via Split Lines.
+1. ~~**vendor_name** : Actuellement contient `buyFromVendorNo`. À améliorer pour récupérer le vrai nom depuis le header de facture via Split Lines.~~ ✅ **RÉSOLU**
 
 2. **Gestion multi-lignes** : Certaines factures peuvent avoir plusieurs lignes G/L - déjà géré par le workflow.
 
@@ -347,4 +377,4 @@ Donc `G/L Account` devient `G_x002F_L_x0020_Account` dans l'API.
 
 ---
 
-*Document mis à jour - 2025-12-19 21:50*
+*Document mis à jour - 2025-12-19 22:10*
