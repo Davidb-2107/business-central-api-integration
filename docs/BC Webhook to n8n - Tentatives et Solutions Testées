@@ -1,0 +1,233 @@
+# BC Webhook to n8n - Tentatives et Solutions Testées
+
+## Objectif
+
+Envoyer un webhook depuis Business Central (SaaS) vers n8n lors du posting d'une facture d'achat, pour alimenter les tables RAG (`invoice_vendor_mappings` et `vendor_gl_mappings`) avec les données de la facture postée.
+
+## Contexte Technique
+
+- **BC Environment**: SaaS Sandbox
+- **Extension Type**: Per-tenant Dev Extension
+- **n8n Webhook URL**: `https://hen8n.com/webhook-test/rag-learning`
+- **Event Subscriber**: `OnAfterPostPurchaseDoc` dans Codeunit `Purch.-Post`
+
+---
+
+## Solutions Testées (Toutes Échouées)
+
+### 1. Appel HTTP Direct dans EventSubscriber
+
+**Code:**
+```al
+[EventSubscriber(ObjectType::Codeunit, Codeunit::"Purch.-Post", 'OnAfterPostPurchaseDoc', '', false, false)]
+local procedure OnAfterPostPurchaseInvoice(...)
+begin
+    // Build JSON...
+    HttpClient.Post(WebhookUrl, HttpContent, HttpResponse);
+end;
+```
+
+**Résultat:** ❌ Erreur "L'opération demandée ne peut pas être exécutée dans ce contexte"
+
+**Raison:** Les appels HTTP ne sont pas autorisés pendant une transaction active dans un EventSubscriber.
+
+---
+
+### 2. Commit() Avant l'Appel HTTP
+
+**Code:**
+```al
+begin
+    // Build JSON...
+    Commit();  // Libérer la transaction
+    HttpClient.Post(WebhookUrl, HttpContent, HttpResponse);
+end;
+```
+
+**Résultat:** ❌ Même erreur
+
+**Raison:** Le `Commit()` ne suffit pas à changer le contexte d'exécution.
+
+---
+
+### 3. Headers HTTP - Clear vs Remove
+
+**Tentative:** Remplacer `HttpHeaders.Clear()` par `HttpHeaders.Remove('Content-Type')` puis `Add()`
+
+**Code:**
+```al
+HttpContent.GetHeaders(HttpHeaders);
+if HttpHeaders.Contains('Content-Type') then
+    HttpHeaders.Remove('Content-Type');
+HttpHeaders.Add('Content-Type', 'application/json');
+```
+
+**Résultat:** ❌ FAILED (pas d'erreur détaillée)
+
+---
+
+### 4. Feature HttpClient dans app.json
+
+**Code app.json:**
+```json
+{
+  "features": [
+    "NoImplicitWith",
+    "HttpClient"
+  ]
+}
+```
+
+**Résultat:** ❌ Toujours FAILED
+
+---
+
+### 5. allowHttpClientRequests dans app.json
+
+**Code app.json:**
+```json
+{
+  "allowHttpClientRequests": true
+}
+```
+
+**Résultat:** ❌ Erreur de compilation: "The property 'allowHttpClientRequests' cannot be used in this context"
+
+**Raison:** Cette propriété n'est pas disponible pour les Dev Extensions per-tenant sur SaaS.
+
+---
+
+### 6. TaskScheduler pour Exécution Différée
+
+**Architecture:**
+- Table `Webhook Queue` (50110) pour stocker les payloads JSON
+- Codeunit `Webhook Task` (50111) pour envoyer les webhooks
+- Utilisation de `TaskScheduler.CreateTask()` pour planifier l'envoi
+
+**Code:**
+```al
+// Dans PostedInvoiceWebhook.al
+WebhookQueue.Init();
+WebhookQueue.SetJsonPayload(JsonText);
+WebhookQueue.Insert(true);
+TaskScheduler.CreateTask(Codeunit::"Webhook Task", 0, true, CompanyName(), CurrentDateTime() + 1000, WebhookQueue.RecordId());
+```
+
+**Résultat:** ❌ TaskScheduler ne s'exécute pas automatiquement
+
+---
+
+### 7. Exécution Manuelle du Webhook Task
+
+**Test:** Page "Webhook Queue List" avec action "Process Now" qui appelle `WebhookTask.Run(Rec)`
+
+**Résultat:** ❌ `HttpResponse.IsBlockedByEnvironment()` retourne `true`
+
+**Message Debug:**
+```
+DEBUG Task: BLOCKED BY ENVIRONMENT
+DEBUG httpbin: BLOCKED BY ENVIRONMENT
+```
+
+---
+
+### 8. Admin Center - Extension Configuration
+
+**Tentative:** Chercher l'option "Allow HttpClient Requests" dans :
+- BC Admin Center → Manage Apps
+- BC → Extension Management → Configure
+
+**Résultat:** ❌ Option non disponible pour les Dev Extensions
+
+---
+
+## Problème Racine Identifié
+
+**BC SaaS bloque tous les appels HTTP externes depuis les Dev Extensions per-tenant.**
+
+La méthode `HttpResponse.IsBlockedByEnvironment()` confirme que c'est une restriction au niveau de l'environnement, pas un problème de code.
+
+---
+
+## Fichiers AL Créés
+
+### Structure Finale du Projet
+
+```
+/src
+├── app.json (v1.5.2.0)
+├── codeunit/
+│   ├── PostedInvoiceWebhook.al (codeunit 50110)
+│   └── WebhookTask.al (codeunit 50111)
+├── table/
+│   └── WebhookQueue.al (table 50110)
+└── page/
+    └── WebhookQueueList.al (page 50110)
+```
+
+### Payload JSON Généré (Validé)
+
+```json
+{
+  "event": "invoice_posted",
+  "invoiceNo": "108220",
+  "vendorNo": "30000",
+  "vendorName": "Graphic Design Institute",
+  "vendorIBAN": "",
+  "amount": 0.0,
+  "paymentReference": "",
+  "mandatCode": "752",
+  "sousMandatCode": "",
+  "lineDescription": "Webhook",
+  "glAccountNo": "6510",
+  "postingDate": "2025-05-01"
+}
+```
+
+---
+
+## Pistes Alternatives à Explorer
+
+### 1. Azure Functions comme Proxy
+```
+BC → Azure Function (même tenant, autorisé) → n8n webhook
+```
+Les appels vers Azure dans le même tenant pourraient être autorisés.
+
+### 2. Power Automate / Logic Apps
+Utiliser un connecteur BC officiel qui déclenche un flow lors du posting.
+
+### 3. Polling depuis n8n
+Au lieu d'un webhook push, n8n interroge périodiquement BC pour les nouvelles factures postées via l'API standard.
+
+### 4. Job Queue Entry avec Codeunit
+Créer un Job Queue Entry récurrent qui traite la table `Webhook Queue` et envoie les webhooks.
+
+### 5. Extension AppSource (pas Per-Tenant)
+Les extensions publiées sur AppSource peuvent avoir des permissions HTTP. Nécessite certification Microsoft.
+
+### 6. BC On-Premise ou Container
+Pas de restrictions HTTP sur les environnements on-premise ou containers Docker.
+
+---
+
+## Conclusion
+
+L'envoi de webhooks HTTP sortants depuis une Dev Extension per-tenant sur BC SaaS est **bloqué par Microsoft** pour des raisons de sécurité. 
+
+Les alternatives les plus prometteuses sont :
+1. **Polling API** (inversion du flux)
+2. **Power Automate** (connecteur officiel)
+3. **Azure Functions** (même tenant)
+
+---
+
+## Références
+
+- [AL HttpClient Documentation](https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/developer/methods-auto/httpclient/httpclient-data-type)
+- [Connecting to External Services](https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/developer/devenv-httpclient)
+- [IsBlockedByEnvironment Method](https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/developer/methods-auto/httpresponsemessage/httpresponsemessage-isblockedbyenvironment-method)
+
+---
+
+*Document créé le 19/12/2025*
