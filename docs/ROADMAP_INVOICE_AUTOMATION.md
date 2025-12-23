@@ -115,6 +115,14 @@ Automatisation du traitement des factures QR suisses vers Microsoft Dynamics 365
 | Mandat | `debtor_name` | `mandat_bc`, `sous_mandat_bc` | `invoice_vendor_mappings` |
 | G/L Account | `vendor_name` + `description_keyword` | `gl_account_no`, `mandat_code` | `vendor_gl_mappings` |
 
+### Exemple de mappings Mandat
+
+| debtor_name | mandat_bc | sous_mandat_bc |
+|-------------|-----------|----------------|
+| Caisse d'allocations familiales | 754 | |
+| Caisse Intercorporative vaudoise | 783 | |
+| SERAFE AG | 93622 | |
+
 ### Exemple de mappings G/L
 
 | vendor_name | description_keyword | gl_account_no | mandat_code |
@@ -123,6 +131,71 @@ Automatisation du traitement des factures QR suisses vers Microsoft Dynamics 365
 | First Up Consultants | periode | 6510 | 754 |
 | CENTRE PATRONAL | centre | 6510 | 763 |
 | Fonds de surcompensation | laje | 50 04 00 02 | 783 |
+
+---
+
+## 🔍 RAG Lookup Mandat - Détail technique
+
+### Objectif
+
+Trouver le code mandat Business Central à partir du nom du débiteur. Le matching se fait sur `debtor_name` (et non `vendor_name`) car plusieurs entreprises peuvent partager le même compte bancaire - c'est le débiteur (celui qui paie) qui détermine le code mandat.
+
+**Exemple :**
+| debtor_name | mandat_bc |
+|-------------|-----------|
+| Caisse d'allocations familiales | 754 |
+| Caisse Intercorporative vaudoise | 783 |
+
+### Requête SQL
+
+```sql
+SELECT mandat_bc, sous_mandat_bc, confidence, usage_count
+FROM invoice_vendor_mappings m
+JOIN bc_companies c ON m.company_id = c.id
+WHERE c.bc_company_id = $1
+  AND m.debtor_name ILIKE '%' || $2 || '%'
+ORDER BY confidence DESC, usage_count DESC
+LIMIT 1
+```
+
+### Paramètres SQL (queryReplacement)
+
+```
+$1 = bc_company_id
+     → Filtre par société Business Central
+     → Source: Get Config
+
+$2 = parsedData.debtorName
+     → Nom du débiteur extrait du QR-code
+     → Source: Code in JavaScript - Regex
+```
+
+### Expression n8n (queryReplacement)
+
+```javascript
+{{ $('Get Config').item.json.config.bc_company_id }},{{ $json.parsedData.debtorName }}
+```
+
+### Sortie
+
+| Champ | Description |
+|-------|-------------|
+| `mandat_bc` | Code mandat BC (ex: "754") |
+| `sous_mandat_bc` | Sous-mandat (optionnel) |
+| `confidence` | Score de confiance 0-1 (ex: 0.90) |
+| `usage_count` | Nombre d'utilisations |
+
+### Décision (IF Confidence Mandat)
+
+| Confidence | Action | needs_review |
+|------------|--------|--------------|
+| ≥ 0.8 | Utiliser valeurs RAG, **skip LLM** | false |
+| < 0.8 | Appeler LLM Infomaniak | true |
+
+### Auto-apprentissage
+
+- Le score de confiance s'incrémente à chaque validation (0.90 → 0.95 → 1.0)
+- Le `usage_count` permet de prioriser les mappings les plus fréquents
 
 ---
 
@@ -349,6 +422,7 @@ sync_checkpoints (
 | 2025-12-19 | Phase 5 - UPSERT vendor_gl_mappings | ✅ 9 mappings créés |
 | 2025-12-19 | Phase 5 - Gestion "No New Invoices" | ✅ COALESCE/NULLIF |
 | 2025-12-23 | RAG Lookup GL - Fix paramètre $3 | ✅ Utilise regexResults.libelle avec fallback |
+| 2025-12-23 | Documentation RAG Lookup Mandat | ✅ Sticky Note + ROADMAP |
 
 ---
 
