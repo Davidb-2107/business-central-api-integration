@@ -126,6 +126,79 @@ Automatisation du traitement des factures QR suisses vers Microsoft Dynamics 365
 
 ---
 
+## 🔍 RAG Lookup GL - Détail technique
+
+### Objectif
+
+Trouver le compte G/L approprié basé sur le fournisseur **ET** le type de dépense. Un même fournisseur peut facturer différents services qui vont sur **différents comptes G/L**.
+
+**Exemple :**
+| vendor_name | Description facture | description_keyword | gl_account_no |
+|-------------|---------------------|---------------------|---------------|
+| CENTRE PATRONAL | Cotisation AVS 2025 | cotisation | 5700 (charges sociales) |
+| CENTRE PATRONAL | Formation sécurité | formation | 6510 (formation) |
+| CENTRE PATRONAL | Assurance RC | assurance | 6300 (assurances) |
+
+### Requête SQL
+
+```sql
+SELECT 
+    gl_account_no, 
+    confidence as gl_confidence, 
+    usage_count as gl_usage_count,
+    description_keyword
+FROM vendor_gl_mappings m
+JOIN bc_companies c ON m.company_id = c.id
+WHERE c.bc_company_id = $1
+  AND m.vendor_name ILIKE '%' || $2 || '%'
+  AND $3 ILIKE '%' || m.description_keyword || '%'
+ORDER BY confidence DESC, usage_count DESC
+LIMIT 1
+```
+
+### Paramètres SQL (queryReplacement)
+
+```
+$1 = bc_company_id
+     → Filtre par société Business Central
+     → Source: Get Config
+
+$2 = parsedData.companyName
+     → Nom du fournisseur extrait du QR-code
+     → Source: Code in JavaScript - Regex
+
+$3 = Description (avec fallback)
+     → 1. regexResults.libelle (ex: "Cotisation LAJE")
+     → 2. ocrText (500 premiers chars si libelle vide)
+     → 3. '' (chaîne vide en dernier recours)
+     → Source: Code in JavaScript - Regex
+```
+
+### Expression n8n (queryReplacement)
+
+```javascript
+{{ $('Get Config').item.json.bc_company_id }}, {{ $('Code in JavaScript - Regex').item.json.parsedData.companyName }}, {{ $('Code in JavaScript - Regex').item.json.regexResults.libelle || $('Code in JavaScript - Regex').item.json.ocrText.substring(0, 500) || '' }}
+```
+
+### Logique de fallback pour $3
+
+| Priorité | Source | Exemple |
+|----------|--------|---------|
+| 1 | `regexResults.libelle` | "Cotisation LAJE" |
+| 2 | `ocrText` (500 chars) | Texte OCR si libelle vide |
+| 3 | `''` | Chaîne vide (évite erreurs null) |
+
+### Sortie
+
+| Champ | Description |
+|-------|-------------|
+| `gl_account_no` | Numéro du compte G/L (ex: "6510") |
+| `gl_confidence` | Score de confiance 0-1 (ex: 0.90) |
+| `gl_usage_count` | Nombre d'utilisations |
+| `description_keyword` | Mot-clé qui a matché |
+
+---
+
 ## 🗄️ Base de données RAG (Neon PostgreSQL)
 
 ### Configuration
@@ -275,6 +348,7 @@ sync_checkpoints (
 | 2025-12-19 | Phase 5 - Enrich Lines with Header | ✅ vendorName propagé |
 | 2025-12-19 | Phase 5 - UPSERT vendor_gl_mappings | ✅ 9 mappings créés |
 | 2025-12-19 | Phase 5 - Gestion "No New Invoices" | ✅ COALESCE/NULLIF |
+| 2025-12-23 | RAG Lookup GL - Fix paramètre $3 | ✅ Utilise regexResults.libelle avec fallback |
 
 ---
 
@@ -314,4 +388,4 @@ sync_checkpoints (
 
 ---
 
-*Dernière mise à jour : 2025-12-19 22:30*
+*Dernière mise à jour : 2025-12-23*
