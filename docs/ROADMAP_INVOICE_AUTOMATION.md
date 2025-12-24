@@ -17,6 +17,11 @@ Automatisation du traitement des factures QR suisses vers Microsoft Dynamics 365
 | Phase 3 | Feedback loop auto-apprentissage | ✅ Complète |
 | Phase 4 | Attribution automatique G/L Account | ✅ Complète |
 | Phase 5 | RAG Polling depuis Posted Invoices | ✅ Complète |
+| Phase 6 | Robustesse & Monitoring | 🚧 En cours |
+| Phase 7 | Multi-sources & Triggers automatiques | 📋 Planifié |
+| Phase 8 | Multi-tenant & Multi-sociétés | 📋 Planifié |
+| Phase 9 | Intelligence améliorée | 📋 Planifié |
+| Phase 10 | Interface utilisateur | 📋 Planifié |
 
 ---
 
@@ -442,14 +447,296 @@ sync_checkpoints (
 
 ---
 
-## 🚀 Améliorations futures
+## 🚧 Phase 6 : Robustesse & Monitoring (En cours)
 
-- [ ] Multi-sociétés : boucle sur toutes les companies dans sync_checkpoints
-- [ ] Monitoring : dashboard des mappings RAG et leur évolution
-- [ ] Cleanup automatique : CRON pour supprimer les pending_invoice_context > 7 jours
-- [ ] Gestion des erreurs : retry/dead letter queue si API BC échoue
-- [ ] Webhooks + Polling : mode hybride pour redondance
-- [ ] Confidence decay : diminuer la confiance des mappings non utilisés
+### 6.1 Gestion des erreurs avancée
+
+| Tâche | Description | Priorité | Statut |
+|-------|-------------|----------|--------|
+| Dead Letter Queue | Redis queue `invoices:failed` pour factures en erreur | Haute | 📋 |
+| Retry automatique | 3 tentatives avec backoff exponentiel (1s, 5s, 30s) | Haute | 📋 |
+| Logging erreurs Neon | Table `error_logs` pour traçabilité | Haute | 📋 |
+| Alertes Slack/Email | Notification webhook si erreur critique | Moyenne | 📋 |
+
+### 6.2 Monitoring & Métriques
+
+| Tâche | Description | Priorité | Statut |
+|-------|-------------|----------|--------|
+| Table `processing_stats` | Compteurs factures/jour, taux succès RAG | Haute | 📋 |
+| Dashboard n8n | Workflow dédié pour générer stats | Moyenne | 📋 |
+| Alertes seuils | Notification si taux RAG miss > 30% | Moyenne | 📋 |
+
+### 6.3 Maintenance automatique
+
+| Tâche | Description | Priorité | Statut |
+|-------|-------------|----------|--------|
+| Cleanup pending_invoice_context | CRON suppression entrées > 7 jours | Haute | 📋 |
+| Cleanup error_logs | CRON archivage logs > 30 jours | Basse | 📋 |
+| Confidence decay | Diminuer confidence mappings non utilisés > 90 jours | Basse | 📋 |
+
+### Architecture Phase 6
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         GESTION DES ERREURS                                 │
+│                                                                             │
+│  [Workflow 1/2]                                                             │
+│       │                                                                     │
+│       ▼                                                                     │
+│  ┌─────────┐     ┌─────────────┐     ┌──────────────┐                      │
+│  │ Erreur? │─YES─▶│ Retry (x3) │─FAIL─▶│ Dead Letter │                      │
+│  └────┬────┘     │ 1s/5s/30s  │      │ Queue Redis │                      │
+│       │          └─────────────┘      └──────┬───────┘                      │
+│      NO                                      │                              │
+│       │                                      ▼                              │
+│       ▼                              ┌──────────────┐                      │
+│  [Suite normale]                     │ Log to Neon │                      │
+│                                      │ error_logs  │                      │
+│                                      └──────┬───────┘                      │
+│                                             │                              │
+│                                             ▼                              │
+│                                      ┌──────────────┐                      │
+│                                      │ Alert Slack │                      │
+│                                      └──────────────┘                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Schéma tables Phase 6
+
+```sql
+-- Table logs d'erreurs
+CREATE TABLE error_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    workflow_name VARCHAR(100) NOT NULL,
+    node_name VARCHAR(100),
+    error_type VARCHAR(50),           -- 'BC_API', 'OCR', 'RAG', 'REDIS', 'LLM'
+    error_message TEXT,
+    error_stack TEXT,
+    input_data JSONB,                 -- Données d'entrée pour debug
+    retry_count INTEGER DEFAULT 0,
+    resolved BOOLEAN DEFAULT false,
+    resolved_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_error_logs_created ON error_logs(created_at DESC);
+CREATE INDEX idx_error_logs_unresolved ON error_logs(resolved) WHERE resolved = false;
+
+-- Table statistiques de traitement
+CREATE TABLE processing_stats (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID REFERENCES bc_companies(id),
+    stat_date DATE NOT NULL,
+    invoices_processed INTEGER DEFAULT 0,
+    invoices_success INTEGER DEFAULT 0,
+    invoices_failed INTEGER DEFAULT 0,
+    rag_hits INTEGER DEFAULT 0,        -- RAG trouvé avec confidence >= 0.8
+    rag_misses INTEGER DEFAULT 0,      -- RAG non trouvé ou confidence < 0.8
+    llm_calls INTEGER DEFAULT 0,
+    avg_processing_time_ms INTEGER,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(company_id, stat_date)
+);
+
+CREATE INDEX idx_processing_stats_date ON processing_stats(stat_date DESC);
+```
+
+---
+
+## 📋 Phase 7 : Multi-sources & Triggers automatiques (Planifié)
+
+### 7.1 Sources d'entrée additionnelles
+
+| Source | Implémentation | Complexité | Priorité |
+|--------|----------------|------------|----------|
+| 📁 Watch Folder | n8n Watch Folder node sur dossier réseau/NAS | Moyenne | Haute |
+| 📧 Email IMAP | Extraction pièces jointes PDF automatique | Moyenne | Haute |
+| ☁️ SharePoint/OneDrive | Microsoft Graph API trigger | Haute | Moyenne |
+| 📱 API mobile | Endpoint REST pour app mobile scan | Basse | Basse |
+
+### 7.2 Preprocessing PDF
+
+| Tâche | Description |
+|-------|-------------|
+| PDF multi-pages | Splitter PDF → plusieurs images → OCR par page |
+| Détection QR position | Identifier automatiquement où est le QR dans la page |
+| Rotation auto | Corriger l'orientation avant OCR |
+| Qualité image | Amélioration contraste/netteté pour meilleur OCR |
+
+### Architecture Phase 7
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         SOURCES D'ENTRÉE MULTIPLES                          │
+│                                                                             │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐                    │
+│  │📁 Folder │  │📧 Email  │  │☁️ Share- │  │📱 Mobile │                    │
+│  │  Watch   │  │  IMAP    │  │  Point   │  │   API    │                    │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘                    │
+│       │             │             │             │                          │
+│       └─────────────┴──────┬──────┴─────────────┘                          │
+│                            │                                               │
+│                            ▼                                               │
+│                   ┌─────────────────┐                                      │
+│                   │  Preprocessing  │                                      │
+│                   │  - PDF split    │                                      │
+│                   │  - QR detect    │                                      │
+│                   │  - Rotation     │                                      │
+│                   └────────┬────────┘                                      │
+│                            │                                               │
+│                            ▼                                               │
+│                   [Workflow 1: QR-Reader]                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📋 Phase 8 : Multi-tenant & Multi-sociétés (Planifié)
+
+### 8.1 Support multi-sociétés BC
+
+| Tâche | Description |
+|-------|-------------|
+| Boucle multi-company | Workflow 4 itère sur toutes les companies actives |
+| Détection auto société | Basée sur `debtorName`, IBAN, ou domaine email |
+| Configuration par société | Seuils confidence, comptes G/L par défaut, alertes |
+| Isolation données | Chaque société a ses propres mappings |
+
+### 8.2 Multi-tenant (SaaS)
+
+| Tâche | Description |
+|-------|-------------|
+| Row-level security | Isolation données par tenant dans PostgreSQL |
+| Gestion credentials | Vault sécurisé pour OAuth tokens par tenant |
+| Onboarding workflow | Processus automatisé d'ajout nouveau client |
+| Billing integration | Compteurs d'utilisation pour facturation |
+
+### Schéma multi-tenant
+
+```sql
+-- Ajout tenant_id pour isolation
+ALTER TABLE bc_companies ADD COLUMN tenant_id UUID;
+ALTER TABLE invoice_vendor_mappings ADD COLUMN tenant_id UUID;
+ALTER TABLE vendor_gl_mappings ADD COLUMN tenant_id UUID;
+
+-- Row-level security
+ALTER TABLE invoice_vendor_mappings ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON invoice_vendor_mappings
+    USING (tenant_id = current_setting('app.current_tenant')::UUID);
+```
+
+---
+
+## 📋 Phase 9 : Intelligence améliorée (Planifié)
+
+### 9.1 RAG avancé
+
+| Amélioration | Description | Impact |
+|--------------|-------------|--------|
+| Fuzzy matching | Tolérance aux typos (Levenshtein distance) | +15% matches |
+| Synonymes | Table de correspondances ("CENTRE PATRONAL" = "CP") | +10% matches |
+| Embedding vectors | Recherche sémantique avec pgvector | +20% matches |
+| Apprentissage négatif | Mémoriser les corrections pour éviter mêmes erreurs | -30% erreurs |
+
+### 9.2 Validation intelligente
+
+| Tâche | Description |
+|-------|-------------|
+| Détection doublons | Alerte si même `payment_reference` déjà traitée |
+| Contrôle montants | Flag si montant > seuil configurable (ex: 50'000 CHF) |
+| Cohérence G/L | Vérifier que le compte existe dans BC avant création |
+| Anomalies fournisseur | Alerte si nouveau fournisseur avec montant élevé |
+
+### Architecture recherche sémantique
+
+```sql
+-- Extension pgvector pour embeddings
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Ajout colonne embedding
+ALTER TABLE vendor_gl_mappings 
+ADD COLUMN description_embedding vector(384);
+
+-- Index pour recherche rapide
+CREATE INDEX idx_description_embedding 
+ON vendor_gl_mappings 
+USING ivfflat (description_embedding vector_cosine_ops);
+
+-- Recherche sémantique
+SELECT gl_account_no, confidence,
+       1 - (description_embedding <=> $1) as similarity
+FROM vendor_gl_mappings
+WHERE company_id = $2
+ORDER BY description_embedding <=> $1
+LIMIT 5;
+```
+
+---
+
+## 📋 Phase 10 : Interface utilisateur (Planifié)
+
+### 10.1 Dashboard de review
+
+| Fonctionnalité | Description |
+|----------------|-------------|
+| Liste factures pending | Factures avec `needs_review: true` |
+| Correction manuelle | Modifier mandat/G/L avant création BC |
+| Validation batch | Approuver plusieurs factures d'un coup |
+| Historique | Timeline des factures traitées avec statut |
+| Recherche | Filtrer par fournisseur, date, montant, statut |
+
+### 10.2 Administration
+
+| Fonctionnalité | Description |
+|----------------|-------------|
+| Gestion mappings | CRUD sur `invoice_vendor_mappings` et `vendor_gl_mappings` |
+| Import/Export CSV | Backup et migration des mappings |
+| Statistiques | Graphiques d'utilisation, taux de succès, évolution |
+| Logs viewer | Consultation des erreurs avec filtres |
+| Configuration | Seuils, alertes, paramètres par société |
+
+### Stack technique suggérée
+
+| Composant | Technologie | Justification |
+|-----------|-------------|---------------|
+| Frontend | Next.js + Tailwind | React, SSR, moderne |
+| Auth | NextAuth.js | OAuth2 Microsoft pour SSO avec BC |
+| Backend | API Routes Next.js | Serverless, simple |
+| Database | Neon PostgreSQL | Déjà en place |
+| Hosting | Vercel | CI/CD automatique, preview deployments |
+
+---
+
+## 📊 Priorités des évolutions
+
+```
+Phase 6 (Robustesse)     ████████████████████ Priorité 1 - En cours
+├── Dead Letter Queue
+├── Retry automatique
+├── Logging erreurs
+├── Alertes critiques
+└── Cleanup automatique
+
+Phase 7 (Multi-sources)  ███████████████░░░░░ Priorité 2
+├── Watch Folder
+├── Email IMAP
+└── PDF preprocessing
+
+Phase 9 (Intelligence)   ██████████░░░░░░░░░░ Priorité 3
+├── Fuzzy matching
+├── Détection doublons
+└── Validation montants
+
+Phase 8 (Multi-tenant)   ██████░░░░░░░░░░░░░░ Priorité 4
+├── Multi-sociétés BC
+└── Row-level security
+
+Phase 10 (UI)            ████░░░░░░░░░░░░░░░░ Priorité 5
+├── Dashboard review
+└── Administration
+```
 
 ---
 
@@ -459,6 +746,8 @@ sync_checkpoints (
 |---------|-------------|
 | [`migrations/001_create_sync_checkpoints.sql`](../migrations/001_create_sync_checkpoints.sql) | Création table + trigger + checkpoint initial |
 | [`migrations/002_alter_vendor_gl_mappings.sql`](../migrations/002_alter_vendor_gl_mappings.sql) | Ajout colonnes vendor_no, dimensions, traceability |
+| `migrations/003_create_error_logs.sql` | 📋 Phase 6 - Table error_logs |
+| `migrations/004_create_processing_stats.sql` | 📋 Phase 6 - Table processing_stats |
 
 ---
 
